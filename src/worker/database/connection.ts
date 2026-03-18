@@ -12,6 +12,7 @@ export class MySql {
   id: number;
   connection: PoolConnection;
   transaction?: boolean;
+  failed?: boolean;
 
   constructor(connection: PoolConnection) {
     if (!connection.threadId) {
@@ -58,10 +59,16 @@ export class MySql {
   }
 
   [Symbol.dispose]() {
-    if (this.transaction) this.commit();
+    if (this.transaction && !this.failed) this.commit();
 
     delete activeConnections[this.id];
-    this.connection.release();
+    // Destroy tainted connections instead of returning them to the pool.
+    // This prevents a dead/corrupted connection from being reused by subsequent queries.
+    if (this.failed) {
+      this.connection.destroy();
+    } else {
+      this.connection.release();
+    }
   }
 }
 

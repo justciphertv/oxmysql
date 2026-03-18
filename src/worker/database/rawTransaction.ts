@@ -6,6 +6,9 @@ import { performance } from 'perf_hooks';
 import { profileBatchStatements, runProfiler } from '../profiler';
 import { triggerFivemEvent } from '../utils/events';
 
+/** Maximum rows per COM_STMT_BULK_EXECUTE call — avoids connector-level failures with very large packets. */
+const BATCH_CHUNK_SIZE = 1000;
+
 const transactionErrorMessage = (queries: { query: string; params?: CFXParameters }[], parameters: CFXParameters) =>
   `${queries.map((query) => `${query.query} ${JSON.stringify(query.params || [])}`).join('\n')}\n${JSON.stringify(
     parameters
@@ -62,7 +65,18 @@ export const rawTransaction = async (
         const startTime = performance.now();
 
         if (group.paramSets.length > 1 && isDML(group.query)) {
-          await connection.batch(group.query, group.paramSets);
+          for (let offset = 0; offset < group.paramSets.length; offset += BATCH_CHUNK_SIZE) {
+            const chunk = group.paramSets.slice(offset, offset + BATCH_CHUNK_SIZE);
+            try {
+              await connection.batch(group.query, chunk);
+            } catch {
+              // COM_STMT_BULK_EXECUTE failed (e.g. protocol/connectivity error).
+              // Fall back to individual text-protocol queries so the transaction can still succeed.
+              for (const params of chunk) {
+                await connection.query(group.query, params);
+              }
+            }
+          }
           logQuery(invokingResource, group.query, performance.now() - startTime, group.paramSets);
         } else {
           for (const params of group.paramSets) {
@@ -90,7 +104,12 @@ export const rawTransaction = async (
 
     response = true;
   } catch (err: any) {
-    await connection.rollback().catch(() => {});
+    try {
+      await connection.rollback();
+    } catch {
+      // rollback failed — connection is likely dead; mark it for destruction
+      connection.failed = true;
+    }
 
     const errMessage = err.sql || transactionErrorMessage(transactions, parameters);
     const msg = `${invokingResource} was unable to complete a transaction!\n${errMessage}\n${err.message}`;
