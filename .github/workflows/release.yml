@@ -10,7 +10,6 @@ permissions:
 
 jobs:
   create-release:
-    if: github.actor_id != 210085057
     runs-on: ubuntu-latest
     steps:
       - name: Install zip
@@ -64,11 +63,3 @@ jobs:
         uses: EndBug/latest-tag@v1
         with:
           ref: ${{ github.ref_name }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Publish package to npm registry
-        run: npm publish --access public

@@ -9,7 +9,6 @@ on:
 
 jobs:
   create-release:
-    if: github.actor_id != 210085057
     runs-on: ubuntu-latest
     steps:
       - name: Install zip
