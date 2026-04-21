@@ -246,6 +246,15 @@ When `parameters` is an object whose keys parse as integers (`{ '1': 'a', '2': '
 
 - `ZEROFILL` and `UNSIGNED` attributes: currently pass through the connector; no special handling. An `UNSIGNED BIGINT` column near 2^64 is subject to the same precision loss as §4.1.
 
+### 4.6 `JSON` and binary-flag classification of BLOB/TEXT columns
+
+- `JSON` columns are returned as **JavaScript `string`s** containing the raw JSON text, matching the mysql2 / mysql-async historical contract. Consumers (Lua callers using `json.decode`, JS callers using `JSON.parse`) are responsible for deserialisation.
+- `NULL` JSON columns are returned as `null` (not the literal string `"null"`).
+
+The BLOB/TEXT branch in `typeCast.ts` classifies "binary data" using **collation id 63** (the MariaDB `binary` collation — the same signal the connector itself uses in `text-decoder.js`). It does **not** use the MySQL column-level `BINARY` flag (`0x80`), because that flag is also set on JSON columns (whose internal collation is `utf8mb4_bin`) and would cause the typeCast to spread the value into a number array. The number-array path is intentionally reserved for columns declared with the `binary` collation — BINARY, VARBINARY, binary BLOBs.
+
+> **[PINNED by tests/14-json-columns.test.ts]** JSON columns come through as strings; `JSON NULL` comes through as `null`; arrays and objects in JSON round-trip via `JSON.parse(value)`.
+
 ---
 
 ## 5. Date / time handling

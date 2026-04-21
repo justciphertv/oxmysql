@@ -30,6 +30,19 @@ export async function createConnectionPool(options: PoolConfig) {
       checkDuplicate: false,
       bigIntAsNumber: true,
       insertIdAsNumber: true,
+      // Match the mysql2 / mysql-async contract: JSON columns arrive in the
+      // result as strings. Consumers (qbx_properties, qbx_spawn, …) call
+      // json.decode() on them from Lua. The mariadb connector has TWO
+      // independent JSON controls:
+      //   - `jsonStrings: true`  — applies to explicit `FieldType.JSON`
+      //   - `autoJsonMap: false` — applies to LONGTEXT-with-JSON-format-hint
+      // We need BOTH; the decoder's FieldType.JSON branch short-circuits
+      // before the autoJsonMap check, so autoJsonMap alone is not enough.
+      // Setting jsonStrings also implies !autoJsonMap (see mariadb
+      // config/connection-options.js), but we set both explicitly for
+      // clarity.
+      jsonStrings: true,
+      autoJsonMap: false,
     });
 
     const result = await dbPool.query<Array<{ version: string }>>('SELECT VERSION() as version');

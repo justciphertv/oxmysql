@@ -9,6 +9,7 @@ DROP TABLE IF EXISTS t_dates;
 DROP TABLE IF EXISTS t_strings;
 DROP TABLE IF EXISTS t_bulk;
 DROP TABLE IF EXISTS t_uids;
+DROP TABLE IF EXISTS t_json;
 
 CREATE TABLE t_basic (
   id          INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -66,3 +67,9 @@ CREATE TABLE t_uids (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   note        VARCHAR(32) NULL
 ) ENGINE=InnoDB AUTO_INCREMENT = 9007199254740993; -- 2^53 + 1
+
+CREATE TABLE t_json (
+  id          INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  payload     JSON NULL,
+  notes       LONGTEXT NULL -- fallback for servers that reject JSON as a distinct column type
+) ENGINE=InnoDB;

@@ -1,6 +1,17 @@
 import type { FieldInfo, TypeCastNextFunction, TypeCastFunction, TypeCastResult } from 'mariadb';
 
-const BINARY_COLLATION_FLAG = 1 << 7;
+/**
+ * MariaDB/MySQL reserve collation id 63 for the `binary` collation. The
+ * connector itself uses the same signal (`col.collation.index === 63`) to
+ * decide whether a BLOB/TEXT column carries binary bytes or textual data
+ * (see node_modules/mariadb/lib/cmd/decoder/text-decoder.js). Use the same
+ * check here — the column `flags & 0x80` ("BINARY" column flag) is set for
+ * a wider set of columns, including JSON which is internally stored with
+ * the `utf8mb4_bin` collation. Treating those as binary and returning a
+ * number[] produced "got table" errors when the Lua side tried to
+ * json.decode() what upstream oxmysql always delivered as a string.
+ */
+const BINARY_COLLATION_INDEX = 63;
 
 /**
  * mariadb-compatible typecasting (mysql-async compatible).
@@ -28,7 +39,7 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
     case 'MEDIUM_BLOB':
     case 'LONG_BLOB':
     case 'BLOB':
-      if (column.flags & BINARY_COLLATION_FLAG) {
+      if ((column as any).collation?.index === BINARY_COLLATION_INDEX) {
         const value = column.buffer();
         if (value === null) return null;
         // number[] spread for Lua compatibility; single cast contained here
