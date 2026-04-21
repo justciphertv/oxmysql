@@ -54,13 +54,21 @@ convar_category 'OxMySQL' {
 	'Configuration',
 	{
 		{ 'Connection string', 'mysql_connection_string', 'CV_STRING', 'mysql://user:password@localhost/database' },
-		{ 'Debug', 'mysql_debug', 'CV_BOOL', 'false' }
+		{ 'Debug', 'mysql_debug', 'CV_BOOL', 'false' },
+		{ 'Enable in-game UI', 'mysql_ui', 'CV_BOOL', 'false' },
+		{ 'Slow query warning (ms)', 'mysql_slow_query_warning', 'CV_INT', '200' },
+		{ 'Log buffer size', 'mysql_log_size', 'CV_INT', '100' },
+		{ 'Version check', 'mysql_versioncheck', 'CV_INT', '1' },
+		{ 'Transaction isolation level', 'mysql_transaction_isolation_level', 'CV_INT', '2' },
+		{ 'Logger service', 'mysql_logger_service', 'CV_STRING', '' }
 	}
 }
 `
 );
 
 mkdirSync('dist', { recursive: true });
+// dist/package.json must match the esbuild `format` below. If `format` ever
+// changes to 'esm', update this file or FXServer will fail to load the bundle.
 writeFileSync('dist/package.json', JSON.stringify({ type: 'commonjs' }, null, 2));
 
 const sharedConfig = {
