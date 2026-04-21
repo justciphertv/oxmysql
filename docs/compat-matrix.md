@@ -235,9 +235,12 @@ When `parameters` is an object whose keys parse as integers (`{ '1': 'a', '2': '
 ### 4.4 `BIT(n)`
 
 - `BIT(1)` → JavaScript `boolean` (true when the first byte equals 1).
+  - **Known defect (H6b):** `BIT(1)` `NULL` currently returns `false`, not `null`. The `typeCast.ts:26` expression `column.buffer()?.[0] === 1` evaluates to `false` when `buffer()` is `null`, because `null?.[0] === 1` is `false`. The `else` branch for wider BIT columns uses `?? null` and therefore correctly returns `null`.
 - `BIT(n > 1)` → JavaScript `number` holding **only the first byte** of the value (see `typeCast.ts:26`).
+  - `NULL` is correctly returned as `null` for these widths.
 
-> **[PHASE-4]** Pin this as a known defect. A regression test inserts `b'10000000 00000001'` into `BIT(16)`, reads it back, and asserts that the returned value equals the current observed result (which is `128`, not `32769`). This test prevents silent changes; the audit item H6 fix is scheduled after the test lands.
+> **[PINNED by tests/05-numeric.test.ts]** `BIT(16) = b'1000000000000001'` returns `128` (first byte), not `32769`. Audit item H6.
+> **[PINNED by tests/05-numeric.test.ts]** `BIT(1) NULL` returns `false`. Audit item H6b, to be fixed together with H6 in a later phase.
 
 ### 4.5 Bit/Boolean-adjacent
 
