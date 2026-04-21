@@ -3,7 +3,7 @@ import { parseResponse } from '../utils/parseResponse';
 import { logQuery, logError } from '../logger';
 import type { CFXParameters, QueryType } from '../../types';
 import { getConnection } from './connection';
-import { pool } from './pool';
+import { awaitPool, pool } from './pool';
 import { mysql_debug } from '../config';
 import { performance } from 'perf_hooks';
 import validateResultSet from '../utils/validateResultSet';
@@ -22,6 +22,12 @@ export const rawQuery = async (
   }
 
   try {
+    // Callers may dispatch queries before initialize has finished the first
+    // successful handshake — qbx_core / ox_doorlock etc. run schema
+    // migrations at resource start without waiting for MySQL.awaitConnection.
+    // Block here so the fast path does not dereference a null pool.
+    await awaitPool();
+
     if (!mysql_debug) {
       // Fast path: call pool.query() directly — same text protocol as connection.query()
       // but avoids acquiring/wrapping/releasing a dedicated PoolConnection.

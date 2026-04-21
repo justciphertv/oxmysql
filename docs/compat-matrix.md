@@ -437,6 +437,16 @@ Boolean or JSON array of resource names. When truthy:
 
 > **[PHASE-4]** Pin observable startup behavior: wrong credentials must not throw from `awaitConnection`; they must keep it pending. A test confirms this; Phase 5 hardens it with retry counters and telemetry without breaking the test contract.
 
+### 10.3 Query dispatch before the pool is ready
+
+A common real-world pattern is consumer resources firing schema migrations (`CREATE TABLE IF NOT EXISTS`, `ALTER TABLE ...`) at resource start without waiting for `MySQL.awaitConnection`. These queries reach the worker before the first successful handshake has set `pool`.
+
+Behaviour guarantee: the worker blocks such queries until the pool is live, then executes them in dispatch order. Concretely, `rawQuery` and `rawExecute` call `awaitPool()` before any `pool!.query` / `pool!.batch` reference. `rawTransaction` and `startTransaction` already wait via `getConnection`.
+
+- The query's promise does not reject while the pool is still initialising.
+- The query's promise does not resolve until after the handshake completes.
+- Credentials that never succeed keep these promises pending forever, consistent with `MySQL.awaitConnection`'s pending-forever behaviour pinned in §10.2.
+
 ### 10.3 Resource-state contract (Lua)
 
 `MySQL.ready(cb)` waits until:

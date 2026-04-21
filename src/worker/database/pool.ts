@@ -4,9 +4,22 @@ import { mysql_transaction_isolation_level } from '../config';
 import { typeCast } from '../utils/typeCast';
 import { print } from '../utils/events';
 import { parentPort } from 'worker_threads';
+import { sleep } from '../utils/sleep';
 
 export let pool: Pool | null = null;
 export let dbVersion = '';
+
+/**
+ * Block until the connection pool is ready for queries. Any code path that
+ * would call `pool!.query` / `pool!.batch` directly must await this first;
+ * otherwise a query dispatched before the first successful handshake
+ * dereferences null and crashes the caller. `getConnection` already does
+ * the same wait for slow-path code.
+ */
+export async function awaitPool(): Promise<Pool> {
+  while (!pool) await sleep(0);
+  return pool;
+}
 
 export async function createConnectionPool(options: PoolConfig) {
   try {

@@ -3,7 +3,7 @@ import type { CFXParameters, QueryType } from '../../types';
 import { parseResponse } from '../utils/parseResponse';
 import { executeType, parseExecute } from '../utils/parseExecute';
 import { getConnection } from './connection';
-import { pool } from './pool';
+import { awaitPool, pool } from './pool';
 import { mysql_debug } from '../config';
 import { performance } from 'perf_hooks';
 import validateResultSet from '../utils/validateResultSet';
@@ -38,6 +38,11 @@ export const rawExecute = async (
   }
 
   try {
+    // See rawQuery for rationale — block until the pool handshake has
+    // completed so the fast-path pool!.query / pool!.batch calls below
+    // cannot dereference null.
+    await awaitPool();
+
     // ── Fast paths: bypass the single-connection overhead when profiling is off ──
 
     if (!mysql_debug) {
