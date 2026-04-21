@@ -487,11 +487,15 @@ MySQL.transaction = (
   );
 };
 
+let startTransactionWarned = false;
 MySQL.startTransaction = async (
   transactions: (queryFn: (sql: string, values: CFXParameters) => Promise<any>) => Promise<boolean>,
   invokingResource = GetInvokingResource()
 ) => {
-  console.warn(`MySQL.startTransaction is "experimental" and may receive breaking changes.`);
+  if (!startTransactionWarned) {
+    startTransactionWarned = true;
+    console.warn(`MySQL.startTransaction is "experimental" and may receive breaking changes.`);
+  }
 
   const beginResult = await sendToWorker<{ connectionId: number } | { error: string }>('beginTransaction', {
     invokingResource,
