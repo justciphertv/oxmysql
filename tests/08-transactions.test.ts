@@ -87,18 +87,32 @@ describe('cluster 8 — transactions', () => {
     expect(rows.map((r) => r.name)).toEqual(['t', 'u']);
   });
 
-  it('accepts shared-parameters shape: strings[] + params[]', async () => {
+  it('accepts shared-parameters shape: strings[] + params[] (matching placeholder counts)', async () => {
+    // Per compat-matrix §2.8 form 1: an array of query strings with a
+    // single shared parameters array. Every query must have the same
+    // placeholder count because the one parameters array is applied to
+    // each — parseTransaction does not pool per-query parameters.
     const res = unwrap(
       await rawTransaction(
         'test',
         [
           'INSERT INTO t_basic (name, value) VALUES (?, ?)',
-          'UPDATE t_basic SET value = value + 1 WHERE name = ?',
+          'INSERT INTO t_basic (name, value) VALUES (?, ?)',
         ] as any,
         ['shared', 1] as any,
       ),
     );
     expect(res).toBe(true);
+
+    const count = unwrap(
+      await rawQuery(
+        'scalar',
+        'test',
+        'SELECT COUNT(*) AS c FROM t_basic WHERE name = ?',
+        ['shared'],
+      ),
+    );
+    expect(count).toBe(2);
   });
 
   it('groups consecutive same-SQL DML entries and uses batch() (atomic)', async () => {

@@ -94,7 +94,11 @@ describe('cluster 5 — numeric coercion', () => {
   // ── insertId precision loss (§4.3 / audit H8) ───────────────────────────
 
   it('insertId > 2^53 is truncated by insertIdAsNumber = true', async () => {
-    // t_uids has AUTO_INCREMENT seeded at 9007199254740993 = 2^53 + 1.
+    // The beforeEach TRUNCATE reset AUTO_INCREMENT to 1; reseed explicitly
+    // for this test so the behaviour pins regardless of how many times
+    // the suite has run against the fixture.
+    await getPool().query('ALTER TABLE t_uids AUTO_INCREMENT = 9007199254740993');
+
     const id = unwrap(
       await rawQuery('insert', 'test', 'INSERT INTO t_uids (note) VALUES (?)', ['hi']),
     ) as number;
@@ -180,12 +184,16 @@ describe('cluster 5 — numeric coercion', () => {
     expect(row.b16).toBe(0x80); // 128, NOT 32769
   });
 
-  it('BIT NULL reads as null', async () => {
+  it('BIT NULL reads: b1=false (H6b defect), b8=null, b16=null', async () => {
+    // Per compat-matrix §4.4 audit H6b: typeCast's BIT(1) branch returns
+    // `false` for NULL because of missing null-check. Wider BIT widths
+    // correctly use `?? null`. Pin both observed shapes; any fix must
+    // update the matrix first.
     await getPool().query('INSERT INTO t_bit (b1, b8, b16) VALUES (NULL, NULL, NULL)');
     const row = unwrap(
       await rawQuery('single', 'test', 'SELECT b1, b8, b16 FROM t_bit', []),
     ) as Record<string, unknown>;
-    expect(row.b1).toBeNull();
+    expect(row.b1).toBe(false);
     expect(row.b8).toBeNull();
     expect(row.b16).toBeNull();
   });

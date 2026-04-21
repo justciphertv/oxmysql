@@ -70,13 +70,18 @@ describe('cluster 3 — scalar, single, and empty-result consistency', () => {
     expect(v).toBe('');
   });
 
-  it('scalar returns false-like TINYINT(1)=0 as false (not null)', async () => {
-    // TINYINT(1) typecast pins boolean semantics; this also confirms
-    // scalar does not collapse false to null via `?? null`.
-    const v = unwrap(await rawQuery('scalar', 'test', 'SELECT CAST(0 AS UNSIGNED) = 1 AS x', []));
-    // The boolean expression result is a TINYINT(1) in MariaDB.
-    // Under our typeCast, column.columnLength === 1 and the string is '0',
-    // so the expected value is `false` exactly.
+  it('scalar returns TINYINT(1)=0 as false (not null)', async () => {
+    // typeCast only coerces actually-declared TINYINT(1) columns to
+    // boolean — not the result of a boolean expression (which MariaDB
+    // returns as a wider INT). Use the t_numeric.flag_bool column, which
+    // is declared TINYINT(1). This also confirms scalar does not collapse
+    // false to null via `?? null`.
+    await getPool().query('TRUNCATE t_numeric');
+    await getPool().query('INSERT INTO t_numeric (flag_bool) VALUES (0)');
+
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT flag_bool FROM t_numeric', []),
+    );
     expect(v).toBe(false);
   });
 
