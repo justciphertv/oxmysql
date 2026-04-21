@@ -1,0 +1,21 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: oxmysql-test-mariadb
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_PASSWORD:-oxtest}
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-oxmysql_test}
+      TZ: UTC
+    command:
+      - --default-time-zone=+00:00
+      - --sql-mode=STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION
+      - --default-authentication-plugin=mysql_native_password
+    ports:
+      - '${MARIADB_PORT:-33060}:3306'
+    healthcheck:
+      test: ['CMD', 'healthcheck.sh', '--connect', '--innodb_initialized']
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      - /var/lib/mysql

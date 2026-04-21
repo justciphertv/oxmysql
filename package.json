@@ -22,7 +22,11 @@
     "watch": "esbuild --watch --bundle --platform=node --target=node16.9.1 src/index.ts --outfile=dist/build.js",
     "lib": "tsc --project lib/tsconfig.lib.json",
     "bootstrap": "lerna bootstrap",
-    "postinstall": "patch-package && bun bootstrap"
+    "postinstall": "patch-package && bun bootstrap",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:up": "docker compose -f tests/compose.yml up -d --wait",
+    "test:down": "docker compose -f tests/compose.yml down -v"
   },
   "dependencies": {
     "mariadb": "^3.5.2",
@@ -38,6 +42,7 @@
     "postinstall-postinstall": "^2.1.0",
     "prettier": "^3.3.3",
     "pretty-quick": "^3.3.1",
-    "typescript": "^5.6.2"
+    "typescript": "^5.6.2",
+    "vitest": "^2.1.0"
   }
 }
