@@ -25,6 +25,9 @@ describe('cluster 10 — compatibility aliases (static maps)', () => {
   it('ghmattimysql alias map matches the pinned contents', () => {
     expect(ghmatti).toEqual({
       query: 'execute',
+      insert: 'insert',
+      update: 'update',
+      single: 'single',
       scalar: 'scalar',
       transaction: 'transaction',
       store: 'store',
