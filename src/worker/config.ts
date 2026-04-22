@@ -14,6 +14,14 @@ export let convertNamedPlaceholders:
 // the pinned behaviour on upgrade. See compat-matrix §4.4.
 export let mysql_bit_full_integer = false;
 
+// Cached OR of `process.env.OXMYSQL_DIAG === '1'` (evaluated at module
+// load) and `!!mysql_debug` (recomputed in updateConfig). typeCast reads
+// this on every column decode — having it as a precomputed boolean keeps
+// the hot path cheap. Kept in sync with `mysql_debug` through
+// updateConfig rather than at first-initialize only.
+const DIAG_ENV = process.env.OXMYSQL_DIAG === '1';
+export let diag_enabled = DIAG_ENV;
+
 export function updateConfig(config: {
   mysql_debug: boolean | string[];
   mysql_slow_query_warning: number;
@@ -24,6 +32,11 @@ export function updateConfig(config: {
   mysql_slow_query_warning = config.mysql_slow_query_warning;
   mysql_ui = config.mysql_ui;
   mysql_log_size = config.mysql_log_size;
+  // Recompute the cached diag flag whenever config changes; OXMYSQL_DIAG
+  // is a static env var so we fold it into the boolean. typeCast reads
+  // the resulting live-binding boolean directly without a per-call
+  // recomputation.
+  diag_enabled = DIAG_ENV || Boolean(config.mysql_debug);
 }
 
 export function setIsolationLevel(level: string) {

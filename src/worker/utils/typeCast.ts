@@ -80,13 +80,11 @@ function diag(
   }
 }
 
-// Evaluated once at module load; OXMYSQL_DIAG cannot be flipped at
-// runtime without a worker restart anyway (it is an env var, not a
-// convar). The mysql_debug half of the check reads the live binding
-// from the config module so it picks up updateConfig() mutations
-// without the lazy-require trick the pre-B2 implementation used.
-const DIAG_ENV = process.env.OXMYSQL_DIAG === '1';
-const DIAG_ENABLED = () => DIAG_ENV || !!workerConfig.mysql_debug;
+// `workerConfig.diag_enabled` is a cached boolean recomputed inside
+// updateConfig() whenever the mysql_debug convar changes. Using the
+// live binding instead of a per-call function avoids the IIFE +
+// require() pattern the pre-B2 implementation had and collapses the
+// check to a single property read on the hot path.
 
 /**
  * mariadb-compatible typecasting (mysql-async compatible).
@@ -143,11 +141,11 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
       if (isBinary) {
         const buf = column.buffer();
         const arr = buf === null ? null : ([...buf] as unknown as TypeCastResult);
-        if (DIAG_ENABLED()) diag(column, 'BLOB-binary', arr);
+        if (workerConfig.diag_enabled) diag(column, 'BLOB-binary', arr);
         return arr;
       }
       const str = column.string();
-      if (DIAG_ENABLED()) diag(column, 'BLOB-text', str);
+      if (workerConfig.diag_enabled) diag(column, 'BLOB-text', str);
       return str;
     }
     // Explicit JSON column type. MySQL 8 reports JSON columns with
@@ -159,12 +157,12 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
     // JSON columns as BLOB/LONGTEXT which the case above handles).
     case 'JSON': {
       const value = column.string();
-      if (DIAG_ENABLED()) diag(column, 'JSON', value);
+      if (workerConfig.diag_enabled) diag(column, 'JSON', value);
       return value === null ? null : value;
     }
     default: {
       const result = next();
-      if (DIAG_ENABLED()) diag(column, 'default-next', result);
+      if (workerConfig.diag_enabled) diag(column, 'default-next', result);
       return result;
     }
   }
