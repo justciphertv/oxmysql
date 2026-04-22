@@ -132,32 +132,56 @@ describe('cluster 7 — rawExecute and prepare', () => {
     expect(res).toBeNull();
   });
 
-  // ── executeType case-sensitivity bug (audit H10) ────────────────────────
+  // ── executeType case-insensitivity (audit H10 fixed in 3.2.0) ──────────
 
-  it('prepare with lowercase `insert` is classified as SELECT (H10)', async () => {
-    // Per compat-matrix §6.2: executeType() is case-sensitive, so lowercase
-    // DML follows the SELECT unpack path — meaning the return shape is
-    // the SELECT-unpack shape, not insertId. Pin this until H10 is fixed.
-    const res = await rawExecute(
-      'test',
-      'insert into t_basic (name, value) values (?, ?)',
-      [['lc', 42]],
-      true,
+  it('prepare with lowercase `insert` is correctly classified as DML', async () => {
+    // 3.2.0: executeType() trims leading whitespace and uppercases the
+    // first keyword. Lowercase DML now takes the DML unpack path and
+    // returns a numeric insertId — matching compat-matrix §6.2.
+    const id = unwrap(
+      await rawExecute(
+        'test',
+        'insert into t_basic (name, value) values (?, ?)',
+        [['lc', 42]],
+        true,
+      ),
     );
+    expect(typeof id).toBe('number');
+    expect(id as number).toBeGreaterThan(0);
+  });
 
-    // The mariadb connector will accept the statement and return an
-    // UpsertResult from pool.query. Our code's SELECT-unpack path will
-    // then try to treat that UpsertResult as a rows array. Pin whichever
-    // observable shape that produces.
-    if ('error' in res) {
-      // Observed outcome: the unpack path raises because the result does
-      // not look like rows.
-      expect(res.error).toBeDefined();
-    } else {
-      // Observed outcome: unpack returns something non-numeric (not an
-      // insertId). That by itself is the visible bug.
-      expect(typeof res.result).not.toBe('number');
-    }
+  it('prepare with uppercase `INSERT` continues to return insertId', async () => {
+    // Regression guard: the 3.2.0 normalisation must not have broken the
+    // case already-pinned by cluster 7 / compat-matrix §6.2.
+    const id = unwrap(
+      await rawExecute(
+        'test',
+        'INSERT INTO t_basic (name, value) VALUES (?, ?)',
+        [['UC', 1]],
+        true,
+      ),
+    );
+    expect(typeof id).toBe('number');
+    expect(id as number).toBeGreaterThan(0);
+  });
+
+  it('prepare with leading whitespace + lowercase DML is classified correctly', async () => {
+    // trimStart() in the normalisation handles leading whitespace — a
+    // defensive extension beyond the narrow H10 report that also covers
+    // generated SQL with indentation.
+    await getPool().query('INSERT INTO t_basic (name, value) VALUES (?, ?)', ['w', 42]);
+
+    const affected = unwrap(
+      await rawExecute(
+        'test',
+        '   delete from t_basic where value = ?',
+        [[42]],
+        true,
+      ),
+    );
+    // DELETE returns affectedRows via the UPDATE-shape unpack.
+    expect(typeof affected).toBe('number');
+    expect(affected).toBe(1);
   });
 
   // ── SELECT with multiple param sets and unpack=true ─────────────────────
