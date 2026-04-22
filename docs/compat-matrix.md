@@ -253,13 +253,38 @@ When `parameters` is an object whose keys parse as integers (`{ '1': 'a', '2': '
 
 ### 4.4 `BIT(n)`
 
+Default behaviour (flag off — matches 3.1.0 byte-for-byte):
+
 - `BIT(1)` → JavaScript `boolean` (true when the first byte equals 1).
-  - **Known defect (H6b):** `BIT(1)` `NULL` currently returns `false`, not `null`. The `typeCast.ts:26` expression `column.buffer()?.[0] === 1` evaluates to `false` when `buffer()` is `null`, because `null?.[0] === 1` is `false`. The `else` branch for wider BIT columns uses `?? null` and therefore correctly returns `null`.
-- `BIT(n > 1)` → JavaScript `number` holding **only the first byte** of the value (see `typeCast.ts:26`).
+  - **Pinned defect (H6b):** `BIT(1) NULL` returns `false`, not `null`. The expression `column.buffer()?.[0] === 1` evaluates to `false` when `buffer()` is `null`.
+- `BIT(n > 1)` → JavaScript `number` holding **only the first byte** of the value.
   - `NULL` is correctly returned as `null` for these widths.
 
-> **[PINNED by tests/05-numeric.test.ts]** `BIT(16) = b'1000000000000001'` returns `128` (first byte), not `32769`. Audit item H6.
-> **[PINNED by tests/05-numeric.test.ts]** `BIT(1) NULL` returns `false`. Audit item H6b, to be fixed together with H6 in a later phase.
+> **[PINNED by tests/05-numeric.test.ts]** Flag-off: `BIT(16) = b'1000000000000001'` returns `128` (first byte), not `32769`. Audit item H6.
+> **[PINNED by tests/05-numeric.test.ts]** Flag-off: `BIT(1) NULL` returns `false`. Audit item H6b.
+
+#### 4.4.1 `mysql_bit_full_integer` convar (3.2.0+)
+
+**Default:** `false` (preserves flag-off behaviour above).
+**Scope:** affects only the `BIT` typeCast branch. No other column type is touched.
+
+Set to `true` to opt into corrected BIT decoding:
+
+| Shape | Flag off (default) | Flag on (corrected) |
+|-------|--------------------|---------------------|
+| `BIT(1)` value `0` or `1` | `boolean` (`false` / `true`) | `boolean` (`false` / `true`) — unchanged |
+| `BIT(1)` `NULL` | `false` (H6b defect) | `null` |
+| `BIT(8)` value `0..255` | `number` (first byte = full value) | `number` — unchanged |
+| `BIT(16)` value `32769` (`0x8001`) | `number` `128` (H6 defect) | `number` `32769` |
+| `BIT(n)` `NULL`, `n > 1` | `null` | `null` — unchanged |
+
+The flag-on decoder returns:
+- `number` when the value fits in `Number.MAX_SAFE_INTEGER` (true for every `BIT(n ≤ 53)` value).
+- `bigint` when the bit width forces it (`BIT(n > 53)` with the high bits set).
+
+The boolean interpretation of `BIT(1)` non-null is preserved under both flag states — the single-bit integer and the boolean interpretation agree, and callers that do `if (row.flag)` continue to work.
+
+> **[PINNED by tests/05-numeric.test.ts]** Flag-on: `BIT(1) NULL` → `null`. `BIT(16) = b'1000000000000001'` → `32769`. `BIT(8) = 128` → `128`. `BIT(n > 1) NULL` → `null`.
 
 ### 4.5 Bit/Boolean-adjacent
 
@@ -310,16 +335,16 @@ All values documented here are what reaches the Lua callback.
 
 ### 6.2 `executeType` (rawExecute / prepare only)
 
-Classifies by looking at the substring before the first space. **Case-sensitive**:
+Classifies by looking at the first keyword, **case-insensitive** and tolerant of leading whitespace:
 
-| Prefix | Classification |
-|--------|---------------|
+| Prefix (any case, any leading whitespace) | Classification |
+|-------------------------------------------|----------------|
 | `INSERT ` | `'insert'` |
 | `UPDATE ` | `'update'` |
 | `DELETE ` | `'update'` (shares the affectedRows return shape) |
-| anything else (including lowercase) | `null` (treated as SELECT) |
+| anything else | `null` (treated as SELECT) |
 
-> **[PHASE-4]** Pin: lowercase `insert ...` via `prepare` returns a SELECT-shaped result. Test locks observed behavior pending the H10 fix in a later phase.
+> **[PINNED by tests/07-raw-execute-prepare.test.ts]** `prepare('insert into …', [[…]], true)` returns a numeric `insertId`. `prepare('INSERT INTO …', …)` continues to return the same. `   delete from …` (leading whitespace, lowercase) classifies as `update` and returns `affectedRows`. Audit item H10 is fixed in 3.2.0.
 
 ### 6.3 Multi-statement semantics
 
