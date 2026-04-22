@@ -64,6 +64,19 @@ CREATE TABLE t_bulk (
   v           INT NOT NULL
 ) ENGINE=InnoDB;
 
+-- t_uids is seeded with AUTO_INCREMENT = 2^53 + 1 so tests can exercise
+-- the BIGINT / insertId precision-loss contract without manually
+-- inserting wide ids.
+--
+-- IMPORTANT: MariaDB / MySQL both reset AUTO_INCREMENT to 1 on TRUNCATE
+-- TABLE, which means the beforeEach TRUNCATE in cluster 5 would nullify
+-- the schema's initial value. Tests that rely on the 2^53+1 seed must
+-- therefore re-apply it inside the test itself:
+--
+--   await getPool().query('ALTER TABLE t_uids AUTO_INCREMENT = 9007199254740993');
+--
+-- See tests/05-numeric.test.ts 'insertId > 2^53 is truncated by
+-- insertIdAsNumber = true' for the canonical example. Audit item L12.
 CREATE TABLE t_uids (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
   note        VARCHAR(32) NULL
