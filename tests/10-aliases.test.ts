@@ -36,6 +36,7 @@ describe('cluster 10 — compatibility aliases (static maps)', () => {
       update: 'mysql_execute',
       insert: 'mysql_insert',
       query: 'mysql_fetch_all',
+      single: 'mysql_fetch',
       scalar: 'mysql_fetch_scalar',
       transaction: 'mysql_transaction',
       store: 'mysql_store',
