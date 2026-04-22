@@ -78,7 +78,26 @@ async function dispatch(action: string, id: number | undefined, data: any) {
       setIsolationLevel(mysql_transaction_isolation_level);
       // Use the user's original value, not connectionOptions.namedPlaceholders which is
       // always boolean false (set to disable mariadb's own handling in favour of ours).
-      initNamedPlaceholders(namedPlaceholders);
+      const npCheck = initNamedPlaceholders(namedPlaceholders);
+      if (!npCheck.patched) {
+        // The named-placeholders patch is missing and the resource would
+        // silently misbind queries on every named placeholder. Fail loud
+        // and fail fast rather than corrupt consumer data.
+        print(`^1[oxmysql] FATAL: named-placeholders patch is not applied.^0`);
+        print(`^1  ${npCheck.diagnostic}^0`);
+        print(
+          `^1  Fix: re-run 'bun install' (or 'npm install') from the oxmysql resource directory so patch-package re-applies patches/named-placeholders+1.1.3.patch.^0`,
+        );
+        triggerFivemEvent('oxmysql:error', {
+          phase: 'init',
+          message: 'named-placeholders patch is not applied',
+          diagnostic: npCheck.diagnostic,
+        });
+        // Exit so the parent's exit handler drains pending requests with
+        // a clear error rather than letting every subsequent named-
+        // placeholder query return wrong data.
+        process.exit(1);
+      }
       setBitFullInteger(mysql_bit_full_integer === true);
 
       updateConfig({
