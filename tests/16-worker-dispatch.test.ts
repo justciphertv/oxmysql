@@ -103,3 +103,59 @@ describe('cluster 16 — worker dispatch safety', () => {
     await expect(handleIncoming(undefined as any)).resolves.toBeUndefined();
   });
 });
+
+describe('cluster 16 — initialize is idempotent (audit M14)', () => {
+  beforeAll(async () => {
+    // Ensure a live pool is already in place so the idempotency branch
+    // is the one we exercise.
+    await initHarness();
+  });
+
+  beforeEach(() => {
+    captured.reset();
+  });
+
+  it('a second initialize with pool already set does not re-enter the retry loop', async () => {
+    // Drive handleIncoming with an initialize message carrying invalid
+    // connection options. If the idempotency branch is working, the
+    // worker re-applies the config fields but skips createConnectionPool
+    // entirely — we observe this by asserting no 'connection attempt N
+    // failed' print ever fires and no oxmysql:error phase:init event
+    // is triggered.
+    await handleIncoming({
+      action: 'initialize',
+      data: {
+        connectionOptions: {
+          host: '127.0.0.1',
+          port: 1, // definitely unreachable
+          user: 'not-a-user',
+          password: 'not-a-password',
+          database: 'nope',
+          connectTimeout: 500,
+        },
+        mysql_transaction_isolation_level: 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED',
+        mysql_debug: false,
+        namedPlaceholders: undefined,
+        mysql_bit_full_integer: false,
+        mysql_init_retry_ms: 1_000,
+      },
+    });
+
+    const retryPrint = captured
+      .byAction('print')
+      .find((m) =>
+        (m.data as unknown[])?.some(
+          (line) => typeof line === 'string' && line.includes('connection attempt'),
+        ),
+      );
+    expect(retryPrint).toBeUndefined();
+
+    const initErrorEvent = captured
+      .byAction('triggerEvent')
+      .find(
+        (m) =>
+          m.data?.event === 'oxmysql:error' && m.data?.payload?.phase === 'init',
+      );
+    expect(initErrorEvent).toBeUndefined();
+  });
+});

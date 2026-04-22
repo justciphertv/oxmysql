@@ -47,6 +47,12 @@ export async function handleIncoming(message: {
 
 parentPort!.on('message', handleIncoming);
 
+// Tracks whether a prior `initialize` is still in its retry loop. A
+// second initialize that arrives while the first is mid-connect must be
+// ignored — otherwise two concurrent retry loops would race for the
+// same pool variable and produce duplicate banner + event output.
+let initializing = false;
+
 async function dispatch(action: string, id: number | undefined, data: any) {
   switch (action) {
     case 'initialize': {
@@ -58,6 +64,17 @@ async function dispatch(action: string, id: number | undefined, data: any) {
         mysql_bit_full_integer,
       } = data;
 
+      if (initializing) {
+        print(
+          `^3[oxmysql] ignoring duplicate initialize message while connection is still being established^0`,
+        );
+        break;
+      }
+
+      // Re-applying the mutable config fields is always safe: later
+      // calls with different values take effect immediately. This is
+      // what lets the FiveM side re-send initialize after a resource
+      // reload without triggering a full re-connect cycle.
       setIsolationLevel(mysql_transaction_isolation_level);
       // Use the user's original value, not connectionOptions.namedPlaceholders which is
       // always boolean false (set to disable mariadb's own handling in favour of ours).
@@ -71,6 +88,12 @@ async function dispatch(action: string, id: number | undefined, data: any) {
         mysql_log_size: 100,
       });
 
+      if (pool) {
+        // Already connected — config re-applied above, no need to
+        // re-enter the retry loop. Audit M14.
+        break;
+      }
+
       // Retry pool creation until successful. Every failed attempt emits
       // visible telemetry so operators can see why the server is stuck and
       // an oxmysql:error event so monitoring resources can react. The retry
@@ -78,22 +101,27 @@ async function dispatch(action: string, id: number | undefined, data: any) {
       // pre-Phase-5.3 30s cadence.
       const retryIntervalMs = Math.max(1_000, Number(data?.mysql_init_retry_ms) || 30_000);
       let attempt = 0;
-      while (!pool) {
-        attempt += 1;
-        await createConnectionPool(connectionOptions);
-        if (pool) break;
+      initializing = true;
+      try {
+        while (!pool) {
+          attempt += 1;
+          await createConnectionPool(connectionOptions);
+          if (pool) break;
 
-        print(
-          `^3[oxmysql] connection attempt ${attempt} failed; retrying in ${retryIntervalMs / 1000}s^0`,
-        );
-        triggerFivemEvent('oxmysql:error', {
-          phase: 'init',
-          attempt,
-          retryIntervalMs,
-          message: `connection attempt ${attempt} failed`,
-        });
+          print(
+            `^3[oxmysql] connection attempt ${attempt} failed; retrying in ${retryIntervalMs / 1000}s^0`,
+          );
+          triggerFivemEvent('oxmysql:error', {
+            phase: 'init',
+            attempt,
+            retryIntervalMs,
+            message: `connection attempt ${attempt} failed`,
+          });
 
-        await sleep(retryIntervalMs);
+          await sleep(retryIntervalMs);
+        }
+      } finally {
+        initializing = false;
       }
 
       if (attempt > 1) {
