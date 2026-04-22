@@ -1,0 +1,46 @@
+name: Tests
+
+# Runs the vitest suite against the disposable MariaDB container defined in
+# tests/compose.yml. The harness tests worker internals against a real
+# database, so CI needs Docker — which ubuntu-latest has.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Start MariaDB fixture
+        run: docker compose -f tests/compose.yml up -d --wait
+
+      - name: Run tests
+        run: bun run test
+
+      - name: MariaDB container logs (on failure)
+        if: failure()
+        run: docker compose -f tests/compose.yml logs mariadb
+
+      - name: Tear down MariaDB fixture
+        if: always()
+        run: docker compose -f tests/compose.yml down -v
