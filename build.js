@@ -31,9 +31,12 @@ writeFileSync(
   })
 );
 
-writeFileSync(
-  'fxmanifest.lua',
-  `fx_version 'cerulean'
+// Kept exactly as emitted pre-B2.3 — only the *order* of when this file
+// is written to disk changed. See the await block at the bottom of this
+// script: we only write fxmanifest.lua after esbuild has successfully
+// produced both bundles, so a failed build cannot leave a manifest on
+// disk that claims a newer version than the bundles actually represent.
+const fxmanifestContent = `fx_version 'cerulean'
 game 'common'
 use_experimental_fxv2_oal 'yes'
 lua54 'yes'
@@ -76,8 +79,7 @@ convar_category 'OxMySQL' {
 		{ 'Logger service', 'mysql_logger_service', 'CV_STRING', '' }
 	}
 }
-`
-);
+`;
 
 mkdirSync('dist', { recursive: true });
 // dist/package.json must match the esbuild `format` below. If `format` ever
@@ -98,14 +100,22 @@ const sharedConfig = {
   },
 };
 
-build({
-  ...sharedConfig,
-  entryPoints: [`./src/fivem/index.ts`],
-  outfile: `dist/index.js`,
-});
+// Wait for both bundles to emit successfully before touching
+// fxmanifest.lua. Prior to B2.3 the manifest was written before esbuild
+// ran, so a failed build left a version-bumped manifest on disk paired
+// with stale bundles — operators then couldn't tell from the banner
+// whether the deployed resource matched the manifest version. Audit O5.
+await Promise.all([
+  build({
+    ...sharedConfig,
+    entryPoints: [`./src/fivem/index.ts`],
+    outfile: `dist/index.js`,
+  }),
+  build({
+    ...sharedConfig,
+    entryPoints: [`./src/worker/worker.ts`],
+    outfile: `dist/worker.js`,
+  }),
+]);
 
-build({
-  ...sharedConfig,
-  entryPoints: [`./src/worker/worker.ts`],
-  outfile: `dist/worker.js`,
-});
+writeFileSync('fxmanifest.lua', fxmanifestContent);
