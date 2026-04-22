@@ -46,6 +46,17 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
         return [...value] as unknown as TypeCastResult;
       }
       return column.string();
+    // Explicit JSON column type. MySQL 8 reports JSON columns with
+    // FieldType.JSON (245) and the connector's decoder for that field
+    // type ignores `autoJsonMap` — only `jsonStrings: true` keeps it
+    // unparsed. Adding an explicit case here makes the string-contract
+    // hold unconditionally regardless of the connector's future default
+    // behaviour or server-vendor differences (MariaDB usually reports
+    // JSON columns as BLOB/LONGTEXT which the case above handles).
+    case 'JSON': {
+      const value = column.string();
+      return value === null ? null : value;
+    }
     default:
       return next();
   }

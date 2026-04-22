@@ -109,6 +109,35 @@ describe('cluster 14 — JSON columns return as strings', () => {
     expect(row.price).toBe(10000);
   });
 
+  // Faithful reproduction of qbx_properties:loadProperties callback — a
+  // MySQL.query (type=null, returns rows array) with GROUP BY on a JSON
+  // column, then iterating rows and json.decode-ing the string. This is
+  // the exact shape where the field report originated.
+  it('qbx_properties:loadProperties query shape — GROUP BY JSON returns strings', async () => {
+    await getPool().query('TRUNCATE t_qbx_props');
+
+    await getPool().query(
+      `INSERT INTO t_qbx_props (property_name, coords, interior) VALUES ` +
+        `('a', '{"x":1.5,"y":2.5,"z":30.0}', 'int1'), ` +
+        `('b', '{"x":5.5,"y":6.5,"z":10.0}', 'int2'), ` +
+        `('c', '{"x":1.5,"y":2.5,"z":30.0}', 'int1')`, // duplicate coords
+    );
+
+    const rows = unwrap(
+      await rawQuery(null, 'test', 'SELECT coords FROM t_qbx_props GROUP BY coords', []),
+    ) as Array<Record<string, unknown>>;
+
+    expect(Array.isArray(rows)).toBe(true);
+    expect(rows.length).toBeGreaterThan(0);
+
+    for (const row of rows) {
+      expect(typeof row.coords).toBe('string');
+      const parsed = JSON.parse(row.coords as string);
+      expect(typeof parsed).toBe('object');
+      expect(typeof parsed.x).toBe('number');
+    }
+  });
+
   // Exercise the DEFAULT (JSON_OBJECT()) path. When a row is inserted without
   // explicitly providing the JSON columns, MariaDB evaluates JSON_OBJECT()
   // at insert time. On read, those values must still come back as strings
