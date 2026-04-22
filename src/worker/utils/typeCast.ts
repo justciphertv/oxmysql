@@ -1,5 +1,6 @@
 import type { FieldInfo, TypeCastNextFunction, TypeCastFunction, TypeCastResult } from 'mariadb';
 import { parentPort } from 'worker_threads';
+import { mysql_bit_full_integer } from '../config';
 
 /**
  * MariaDB/MySQL reserve collation id 63 for the `binary` collation. The
@@ -13,6 +14,27 @@ import { parentPort } from 'worker_threads';
  * json.decode() what upstream oxmysql always delivered as a string.
  */
 const BINARY_COLLATION_INDEX = 63;
+
+/**
+ * Decode a BIT(n>1) column buffer as a big-endian integer.
+ *
+ * Node's `Buffer.readUIntBE` only supports 1..6-byte reads (up to 48
+ * bits), so for BIT(49..64) we fall back to a BigInt accumulator. The
+ * result is returned as `number` when it fits in
+ * `Number.MAX_SAFE_INTEGER` and as `bigint` otherwise. The common cases
+ * (BIT(1..48)) always produce a `number`.
+ */
+function decodeBitFullInteger(buf: Buffer): number | bigint {
+  const len = buf.length;
+  if (len === 0) return 0;
+  if (len <= 6) return buf.readUIntBE(0, len);
+
+  let big = 0n;
+  for (const byte of buf) {
+    big = (big << 8n) | BigInt(byte);
+  }
+  return big <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(big) : big;
+}
 
 // One-shot diagnostic: for the first N columns of each unique (type, columnType)
 // combination, print the decision typeCast made plus the runtime type of the
@@ -91,8 +113,33 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
     }
     case 'TINY':
       return column.columnLength === 1 ? column.string() === '1' : next();
-    case 'BIT':
-      return column.columnLength === 1 ? column.buffer()?.[0] === 1 : (column.buffer()?.[0] ?? null);
+    case 'BIT': {
+      const buf = column.buffer();
+
+      // BIT(1) — boolean semantics. The flag-on path only differs for
+      // NULL: historical defect H6b returned `false` for BIT(1) NULL
+      // because `null?.[0] === 1` evaluates to false. When the flag is
+      // on we correctly return null instead.
+      if (column.columnLength === 1) {
+        if (buf === null) return mysql_bit_full_integer ? null : false;
+        return buf[0] === 1;
+      }
+
+      // BIT(n > 1).
+      if (buf === null) return null;
+
+      if (!mysql_bit_full_integer) {
+        // 3.1.0 pinned defect H6: return only the first byte. Preserved
+        // so a 3.1.0 -> 3.2.0 upgrade with the flag off is byte-for-byte
+        // behaviourally identical.
+        return buf[0] ?? null;
+      }
+
+      // Flag-on: decode the full big-endian integer. Prefer `number` when
+      // the value is safely representable (<= Number.MAX_SAFE_INTEGER);
+      // only return a bigint when the bit width forces it.
+      return decodeBitFullInteger(buf);
+    }
     case 'TINY_BLOB':
     case 'MEDIUM_BLOB':
     case 'LONG_BLOB':

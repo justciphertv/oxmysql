@@ -4,8 +4,9 @@
 // is a known trade-off (BIGINT / insertId precision) or a defect (BIT(>1)
 // truncation) — the tests exist so future changes are deliberate.
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getPool, initHarness, rawQuery } from './helpers/worker-harness';
+import { setBitFullInteger } from '../src/worker/config';
 
 function unwrap<T>(res: { result: T } | { error: string }): T {
   if ('error' in res) throw new Error(`rawQuery returned error: ${res.error}`);
@@ -169,11 +170,12 @@ describe('cluster 5 — numeric coercion', () => {
     expect(row.b8).toBe(0x80); // 128
   });
 
-  it('BIT(16) returns only the first byte (known defect; audit H6)', async () => {
+  // Audit H6 pinned default behaviour (flag off).
+  it('BIT(16) with flag off returns only the first byte (pinned H6)', async () => {
     // b'1000000000000001' = 0x8001 = 32769. MariaDB stores big-endian so
-    // the buffer is [0x80, 0x01]. typeCast returns buffer()[0] = 0x80 = 128.
-    // Pin this until H6 is fixed; any change must update the compat matrix
-    // first.
+    // the buffer is [0x80, 0x01]. typeCast returns buffer()[0] = 0x80 = 128
+    // under the default (flag off). The flag-on behaviour lives in its
+    // own describe block below.
     await getPool().query(
       "INSERT INTO t_bit (b1, b8, b16) VALUES (b'1', b'0', b'1000000000000001')",
     );
@@ -184,16 +186,92 @@ describe('cluster 5 — numeric coercion', () => {
     expect(row.b16).toBe(0x80); // 128, NOT 32769
   });
 
-  it('BIT NULL reads: b1=false (H6b defect), b8=null, b16=null', async () => {
-    // Per compat-matrix §4.4 audit H6b: typeCast's BIT(1) branch returns
-    // `false` for NULL because of missing null-check. Wider BIT widths
-    // correctly use `?? null`. Pin both observed shapes; any fix must
-    // update the matrix first.
+  // Audit H6b pinned default behaviour (flag off).
+  it('BIT NULL with flag off: b1=false (pinned H6b), b8=null, b16=null', async () => {
     await getPool().query('INSERT INTO t_bit (b1, b8, b16) VALUES (NULL, NULL, NULL)');
     const row = unwrap(
       await rawQuery('single', 'test', 'SELECT b1, b8, b16 FROM t_bit', []),
     ) as Record<string, unknown>;
     expect(row.b1).toBe(false);
+    expect(row.b8).toBeNull();
+    expect(row.b16).toBeNull();
+  });
+});
+
+// ── BIT with mysql_bit_full_integer = true (audit H6 + H6b corrected) ──
+// These tests toggle the shared worker config flag, run, then restore it.
+// Vitest runs tests within a file sequentially, so the shared state is
+// safe. Other test files that observe BIT behaviour always run with the
+// flag off (the default), preserving the 3.1.0 pinned semantics.
+
+describe('cluster 5 — BIT with mysql_bit_full_integer flag enabled', () => {
+  beforeAll(async () => {
+    await initHarness();
+    setBitFullInteger(true);
+  });
+
+  afterAll(() => {
+    setBitFullInteger(false);
+  });
+
+  beforeEach(async () => {
+    await getPool().query('TRUNCATE t_bit');
+  });
+
+  it('BIT(1) non-null is still a boolean (flag preserves boolean semantics)', async () => {
+    await getPool().query("INSERT INTO t_bit (b1, b8, b16) VALUES (b'1', b'0', b'0')");
+    const row = unwrap(
+      await rawQuery('single', 'test', 'SELECT b1 FROM t_bit', []),
+    ) as Record<string, unknown>;
+    expect(typeof row.b1).toBe('boolean');
+    expect(row.b1).toBe(true);
+  });
+
+  it('BIT(1) NULL returns null (H6b fix; was false with flag off)', async () => {
+    await getPool().query('INSERT INTO t_bit (b1, b8, b16) VALUES (NULL, NULL, NULL)');
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT b1 FROM t_bit', []),
+    );
+    expect(v).toBeNull();
+  });
+
+  it('BIT(8) with value 128 returns 128 as number (unchanged; first byte = full value)', async () => {
+    await getPool().query(
+      "INSERT INTO t_bit (b1, b8, b16) VALUES (b'1', b'10000000', b'0')",
+    );
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT b8 FROM t_bit', []),
+    );
+    expect(typeof v).toBe('number');
+    expect(v).toBe(128);
+  });
+
+  it('BIT(16) returns the full big-endian integer (H6 fix; was first-byte-only)', async () => {
+    // 32769 = 0x8001, stored big-endian as [0x80, 0x01].
+    await getPool().query(
+      "INSERT INTO t_bit (b1, b8, b16) VALUES (b'1', b'0', b'1000000000000001')",
+    );
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT b16 FROM t_bit', []),
+    );
+    expect(typeof v).toBe('number');
+    expect(v).toBe(32769);
+  });
+
+  it('BIT(16) of 0 returns 0 as number', async () => {
+    await getPool().query("INSERT INTO t_bit (b1, b8, b16) VALUES (b'0', b'0', b'0')");
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT b16 FROM t_bit', []),
+    );
+    expect(typeof v).toBe('number');
+    expect(v).toBe(0);
+  });
+
+  it('BIT(n > 1) NULL still returns null (flag does not regress the wider-BIT null path)', async () => {
+    await getPool().query('INSERT INTO t_bit (b1, b8, b16) VALUES (NULL, NULL, NULL)');
+    const row = unwrap(
+      await rawQuery('single', 'test', 'SELECT b8, b16 FROM t_bit', []),
+    ) as Record<string, unknown>;
     expect(row.b8).toBeNull();
     expect(row.b16).toBeNull();
   });
