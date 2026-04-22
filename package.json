@@ -22,7 +22,7 @@
     "watch": "esbuild --watch --bundle --platform=node --target=node16.9.1 src/index.ts --outfile=dist/build.js",
     "lib": "tsc --project lib/tsconfig.lib.json",
     "bootstrap": "lerna bootstrap",
-    "postinstall": "patch-package && bun bootstrap",
+    "postinstall": "node ./scripts/postinstall.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:up": "docker compose -f tests/compose.yml up -d --wait",
