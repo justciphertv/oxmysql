@@ -14,6 +14,21 @@ export class MySql {
   transaction?: boolean;
   failed?: boolean;
 
+  /** Set by `endTransaction` when it begins tearing a transaction down.
+   *  Once true, `runTransactionQuery` callers refuse to start new work on
+   *  this connection even if the map still lists it. This closes audit
+   *  item M1: the parent-side 30s timeout races its own in-flight
+   *  transactionQuery messages, and without this flag the worker would
+   *  begin a fresh query on the connection mid-rollback. */
+  closed = false;
+
+  /** Count of connector-level operations currently executing on this
+   *  MySql wrapper. `waitUntilIdle()` resolves once this drops to zero so
+   *  `endTransaction` can safely commit/rollback without overlapping a
+   *  still-running query. */
+  private inFlight = 0;
+  private idleWaiters: Array<() => void> = [];
+
   constructor(connection: PoolConnection) {
     if (!connection.threadId) {
       throw new Error('Connection must have a threadId');
@@ -26,21 +41,41 @@ export class MySql {
 
   async query(query: string, values: CFXParameters = []) {
     scheduleTick();
-
-    return await this.connection.query(query, values);
+    return await this.track(() => this.connection.query(query, values));
   }
 
   async execute(query: string, values: CFXParameters = []) {
     scheduleTick();
-
     // Use query() (text protocol) to avoid ER_UNSUPPORTED_PS on SELECT/LIMIT queries
-    return await this.connection.query(query, values);
+    return await this.track(() => this.connection.query(query, values));
   }
 
   async batch(query: string, values: CFXParameters[]) {
     scheduleTick();
+    return await this.track(() => this.connection.batch(query, values));
+  }
 
-    return await this.connection.batch(query, values);
+  private async track<T>(op: () => Promise<T>): Promise<T> {
+    this.inFlight += 1;
+    try {
+      return await op();
+    } finally {
+      this.inFlight -= 1;
+      if (this.inFlight === 0 && this.idleWaiters.length > 0) {
+        const waiters = this.idleWaiters.splice(0);
+        for (const w of waiters) w();
+      }
+    }
+  }
+
+  /** Resolves once no connector-level operation is in flight on this
+   *  wrapper. `endTransaction` awaits this before committing / rolling
+   *  back so it cannot overlap an existing `runTransactionQuery`. */
+  async waitUntilIdle(): Promise<void> {
+    if (this.inFlight === 0) return;
+    return new Promise<void>((resolve) => {
+      this.idleWaiters.push(resolve);
+    });
   }
 
   beginTransaction() {

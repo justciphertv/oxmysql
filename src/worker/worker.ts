@@ -162,7 +162,12 @@ async function dispatch(action: string, id: number | undefined, data: any) {
 
     case 'endTransaction': {
       const { connectionId, commit } = data as { connectionId: number; commit: boolean };
-      await endTransaction(connectionId, commit);
+      const result = await endTransaction(connectionId, commit);
+      // Parent may send `endTransaction` either as a fire-and-forget
+      // message (no id) or as a request expecting the result payload
+      // (id set) when the mysql_start_transaction_propagate_errors
+      // convar is enabled. Respond only if the parent is listening.
+      if (id !== undefined) sendResponse(id, result);
       break;
     }
 

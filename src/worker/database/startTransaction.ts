@@ -35,6 +35,20 @@ export const runTransactionQuery = async (
 ): Promise<{ result: any } | { error: string }> => {
   const conn = activeConnections[connectionId] ?? null;
 
+  // Audit M1 race guard: once endTransaction has begun tearing the
+  // transaction down, refuse to start fresh queries on the same
+  // connection. Without this, the parent's timeout handler and a
+  // still-pending queryFn call can land on the worker in a short window
+  // where `activeConnections` still holds the MySql wrapper but is about
+  // to be reaped.
+  if (!conn || conn.closed) {
+    return {
+      error: conn?.closed
+        ? `Transaction has been closed; query not executed.`
+        : `Connection used by transaction timed out after 30 seconds.`,
+    };
+  }
+
   try {
     const result = await runQuery(conn, sql, values);
     return { result };
@@ -43,10 +57,25 @@ export const runTransactionQuery = async (
   }
 };
 
-export const endTransaction = async (connectionId: number, commit: boolean): Promise<void> => {
+export const endTransaction = async (
+  connectionId: number,
+  commit: boolean
+): Promise<{ result: true } | { error: string }> => {
   const conn = activeConnections[connectionId];
 
-  if (!conn) return;
+  if (!conn) return { result: true };
+
+  // Mark the wrapper closed so any concurrent runTransactionQuery refuses
+  // to start new work, then wait for any op already in flight to complete
+  // before committing / rolling back. Together these prevent the M1 race.
+  conn.closed = true;
+  try {
+    await conn.waitUntilIdle();
+  } catch {
+    /* waitUntilIdle never throws, but defensive */
+  }
+
+  let endError: Error | null = null;
 
   try {
     if (commit) {
@@ -54,10 +83,33 @@ export const endTransaction = async (connectionId: number, commit: boolean): Pro
     } else {
       await conn.rollback();
     }
-  } catch {
-    // ignore commit/rollback errors
+  } catch (err: any) {
+    endError = err instanceof Error ? err : new Error(String(err));
+    conn.failed = true;
   } finally {
     delete activeConnections[connectionId];
-    conn.connection.release();
+    // If the commit/rollback failed, the connection is in an indeterminate
+    // state; destroy it rather than returning a tainted connection to the
+    // pool. Matches the rawTransaction behaviour.
+    if (conn.failed) {
+      try {
+        conn.connection.destroy();
+      } catch {
+        /* already gone */
+      }
+    } else {
+      try {
+        conn.connection.release();
+      } catch {
+        /* already gone */
+      }
+    }
   }
+
+  if (endError) {
+    return {
+      error: `${commit ? 'commit' : 'rollback'} failed: ${endError.message}`,
+    };
+  }
+  return { result: true };
 };
