@@ -52,6 +52,12 @@ export async function createConnectionPool(options: PoolConfig) {
     print(
       `${dbVersion} ^2Database server connection established!^0 ^7[oxmysql-mariadb-patch ${BUILD_STAMP}]^0`,
     );
+    // Diagnostic banner: print the JSON-related options we applied so
+    // operators can confirm the fix is live even before any query fires.
+    print(
+      `^7[oxmysql-mariadb-patch ${BUILD_STAMP}] pool options applied: ` +
+        `jsonStrings=true autoJsonMap=false bigIntAsNumber=true insertIdAsNumber=true^0`,
+    );
     parentPort!.postMessage({ action: 'dbVersion', data: dbVersion });
 
     if (options.multipleStatements) {

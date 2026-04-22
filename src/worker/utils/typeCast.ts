@@ -1,4 +1,5 @@
 import type { FieldInfo, TypeCastNextFunction, TypeCastFunction, TypeCastResult } from 'mariadb';
+import { parentPort } from 'worker_threads';
 
 /**
  * MariaDB/MySQL reserve collation id 63 for the `binary` collation. The
@@ -12,6 +13,63 @@ import type { FieldInfo, TypeCastNextFunction, TypeCastFunction, TypeCastResult 
  * json.decode() what upstream oxmysql always delivered as a string.
  */
 const BINARY_COLLATION_INDEX = 63;
+
+// One-shot diagnostic: for the first N columns of each unique (type, columnType)
+// combination, print the decision typeCast made plus the runtime type of the
+// value it returns. Dedupes after the first hit so the server log is not
+// flooded. Toggled on automatically when mysql_debug is truthy; also always
+// on when OXMYSQL_DIAG=1 in the environment.
+const seen = new Set<string>();
+function diag(
+  column: FieldInfo,
+  branch: string,
+  value: unknown,
+  extra?: Record<string, unknown>,
+) {
+  const key = `${column.type}|${(column as any).columnType}|${branch}`;
+  if (seen.has(key)) return;
+  seen.add(key);
+
+  const preview =
+    typeof value === 'string'
+      ? `string(${value.length}) ${JSON.stringify(value.slice(0, 60))}`
+      : Array.isArray(value)
+        ? `array(len=${value.length}) first=${JSON.stringify(value.slice(0, 4))}`
+        : value === null
+          ? 'null'
+          : typeof value === 'object'
+            ? `object keys=${Object.keys(value as object).slice(0, 6).join(',')}`
+            : `${typeof value} ${JSON.stringify(value)}`;
+
+  try {
+    parentPort?.postMessage({
+      action: 'print',
+      data: [
+        `^6[typeCast-diag]^0 name=${(column as any).name?.()} type=${column.type} ` +
+          `columnType=${(column as any).columnType} colLen=${(column as any).columnLength} ` +
+          `collation=${JSON.stringify((column as any).collation)} branch=${branch} ` +
+          `returns=${preview}` +
+          (extra ? ` ${JSON.stringify(extra)}` : ''),
+      ],
+    });
+  } catch {
+    /* parentPort not available in tests — fall through silently */
+  }
+}
+
+const DIAG_ENABLED = () =>
+  process.env.OXMYSQL_DIAG === '1' ||
+  // Lazy so we pick up mysql_debug convar changes at runtime without
+  // adding a circular import — we read from config module only when needed.
+  (() => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { mysql_debug } = require('../config');
+      return !!mysql_debug;
+    } catch {
+      return false;
+    }
+  })();
 
 /**
  * mariadb-compatible typecasting (mysql-async compatible).
@@ -38,14 +96,18 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
     case 'TINY_BLOB':
     case 'MEDIUM_BLOB':
     case 'LONG_BLOB':
-    case 'BLOB':
-      if ((column as any).collation?.index === BINARY_COLLATION_INDEX) {
-        const value = column.buffer();
-        if (value === null) return null;
-        // number[] spread for Lua compatibility; single cast contained here
-        return [...value] as unknown as TypeCastResult;
+    case 'BLOB': {
+      const isBinary = (column as any).collation?.index === BINARY_COLLATION_INDEX;
+      if (isBinary) {
+        const buf = column.buffer();
+        const arr = buf === null ? null : ([...buf] as unknown as TypeCastResult);
+        if (DIAG_ENABLED()) diag(column, 'BLOB-binary', arr);
+        return arr;
       }
-      return column.string();
+      const str = column.string();
+      if (DIAG_ENABLED()) diag(column, 'BLOB-text', str);
+      return str;
+    }
     // Explicit JSON column type. MySQL 8 reports JSON columns with
     // FieldType.JSON (245) and the connector's decoder for that field
     // type ignores `autoJsonMap` — only `jsonStrings: true` keeps it
@@ -55,9 +117,13 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
     // JSON columns as BLOB/LONGTEXT which the case above handles).
     case 'JSON': {
       const value = column.string();
+      if (DIAG_ENABLED()) diag(column, 'JSON', value);
       return value === null ? null : value;
     }
-    default:
-      return next();
+    default: {
+      const result = next();
+      if (DIAG_ENABLED()) diag(column, 'default-next', result);
+      return result;
+    }
   }
 };
