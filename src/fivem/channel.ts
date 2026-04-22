@@ -91,7 +91,7 @@ export class WorkerChannel {
           if (!live) return;
           this.pending.delete(id);
           const reason = `oxmysql request '${action}' timed out after ${effectiveTimeout}ms`;
-          this.options.onSynthesizedError?.({ action, reason });
+          this.reportSynthesizedError({ action, reason });
           live.settle({ error: reason });
         }, effectiveTimeout);
       }
@@ -129,8 +129,24 @@ export class WorkerChannel {
 
     for (const [, entry] of entries) {
       if (entry.timer) clearTimeout(entry.timer);
-      this.options.onSynthesizedError?.({ action: entry.action, reason });
+      // Each callback invocation is isolated so a throw from one
+      // onSynthesizedError callback cannot stop the drain of the
+      // remaining pending entries. Audit O1.
+      this.reportSynthesizedError({ action: entry.action, reason });
       entry.settle({ error: reason });
+    }
+  }
+
+  private reportSynthesizedError(err: { action: string; reason: string }) {
+    if (!this.options.onSynthesizedError) return;
+    try {
+      this.options.onSynthesizedError(err);
+    } catch (cbErr) {
+      // eslint-disable-next-line no-console
+      console.error(
+        'oxmysql WorkerChannel onSynthesizedError threw; continuing drain:',
+        cbErr,
+      );
     }
   }
 }

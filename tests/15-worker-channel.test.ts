@@ -181,4 +181,61 @@ describe('cluster 15 — WorkerChannel', () => {
       vi.useRealTimers();
     }
   });
+
+  // Audit O1 — a misbehaving onSynthesizedError callback that throws on
+  // one invocation must not prevent the drain of the remaining pending
+  // requests. This simulates a monitoring resource that blows up while
+  // trying to react to the first exit event.
+  it('exit drain continues when onSynthesizedError throws on the first call', async () => {
+    const worker = new FakeWorker();
+    let callCount = 0;
+    const onError = vi.fn(() => {
+      callCount += 1;
+      if (callCount === 1) throw new Error('synthetic callback failure');
+    });
+    const channel = new WorkerChannel(worker, { onSynthesizedError: onError });
+
+    const promises = [
+      channel.send('query', { sql: 'A' }),
+      channel.send('execute', { sql: 'B' }),
+      channel.send('transaction', {}),
+    ];
+    expect(channel.pendingCount()).toBe(3);
+
+    worker.exit(42);
+
+    // Every pending entry must have settled despite the first callback
+    // throwing. The second and third callbacks also get a chance to run.
+    const results = await Promise.all(promises);
+    for (const r of results) {
+      expect(r).toHaveProperty('error');
+    }
+    expect(channel.pendingCount()).toBe(0);
+    expect(onError).toHaveBeenCalledTimes(3);
+  });
+
+  // Same robustness guard for the timeout path.
+  it('timeout path reports a throwing onSynthesizedError but still settles', async () => {
+    vi.useFakeTimers();
+    try {
+      const worker = new FakeWorker();
+      const onError = vi.fn(() => {
+        throw new Error('synthetic callback failure');
+      });
+      const channel = new WorkerChannel(worker, {
+        defaultTimeoutMs: 250,
+        onSynthesizedError: onError,
+      });
+
+      const promise = channel.send('query', {});
+      await vi.advanceTimersByTimeAsync(250);
+
+      const r = await promise;
+      expect((r as { error: string }).error).toMatch(/timed out/);
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(channel.pendingCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
