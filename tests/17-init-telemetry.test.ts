@@ -45,7 +45,9 @@ describe('cluster 17 — init retry telemetry (§5.3)', () => {
 
   it('FiveM side exposes the convar and forwards it in the initialize payload', () => {
     expect(fivemSrc).toMatch(/GetConvarInt\('mysql_init_retry_ms', 30_?000\)/);
-    expect(fivemSrc).toMatch(/mysql_init_retry_ms,\s*mysql_debug:/);
+    // Be tolerant of additional keys between mysql_init_retry_ms and
+    // mysql_debug: — Phase A3 adds mysql_bit_full_integer there.
+    expect(fivemSrc).toMatch(/mysql_init_retry_ms,\s*[\s\S]*?mysql_debug:/);
   });
 
   it('preserves the pre-Phase-5.3 default cadence (30s) when the convar is unset', () => {

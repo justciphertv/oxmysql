@@ -1,5 +1,5 @@
 import { parentPort } from 'worker_threads';
-import { updateConfig, setIsolationLevel, initNamedPlaceholders } from './config';
+import { updateConfig, setIsolationLevel, initNamedPlaceholders, setBitFullInteger } from './config';
 import { createConnectionPool, pool } from './database/pool';
 import { rawQuery } from './database/rawQuery';
 import { rawExecute } from './database/rawExecute';
@@ -50,12 +50,19 @@ parentPort!.on('message', handleIncoming);
 async function dispatch(action: string, id: number | undefined, data: any) {
   switch (action) {
     case 'initialize': {
-      const { connectionOptions, mysql_transaction_isolation_level, mysql_debug, namedPlaceholders } = data;
+      const {
+        connectionOptions,
+        mysql_transaction_isolation_level,
+        mysql_debug,
+        namedPlaceholders,
+        mysql_bit_full_integer,
+      } = data;
 
       setIsolationLevel(mysql_transaction_isolation_level);
       // Use the user's original value, not connectionOptions.namedPlaceholders which is
       // always boolean false (set to disable mariadb's own handling in favour of ours).
       initNamedPlaceholders(namedPlaceholders);
+      setBitFullInteger(mysql_bit_full_integer === true);
 
       updateConfig({
         mysql_debug,

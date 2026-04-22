@@ -223,6 +223,16 @@ const mysql_init_retry_ms = GetConvarInt('mysql_init_retry_ms', 30_000);
 const mysql_start_transaction_propagate_errors =
   GetConvar('mysql_start_transaction_propagate_errors', 'false') === 'true';
 
+// Opt-in corrected BIT typeCast behaviour (audit H6 + H6b).
+// Default preserves the pinned 3.1.0 behaviour: BIT(1) NULL returns false,
+// BIT(n>1) returns only the first byte. When 'true':
+//   - BIT(1) NULL returns null.
+//   - BIT(n>1) returns the full decoded big-endian integer. number when
+//     safely representable (<= 2^53 - 1), bigint otherwise.
+// See compat-matrix §4.4.
+const mysql_bit_full_integer =
+  GetConvar('mysql_bit_full_integer', 'false') === 'true';
+
 const connectionOptions = buildConnectionOptions();
 
 // Extract and remove the sentinel before sending options to the mariadb pool.
@@ -234,6 +244,7 @@ worker.postMessage({
     connectionOptions: poolOptions,
     mysql_transaction_isolation_level,
     mysql_init_retry_ms,
+    mysql_bit_full_integer,
     mysql_debug: false,
     namedPlaceholders: userNamedPlaceholders,
   },

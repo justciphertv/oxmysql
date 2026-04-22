@@ -7,6 +7,13 @@ export let convertNamedPlaceholders:
   | null
   | ((query: string, parameters: Record<string, unknown>) => [string, unknown[]]) = null;
 
+// When true, typeCast decodes BIT(n>1) as the full big-endian integer
+// rather than only the first byte, and returns `null` for BIT(1) NULL
+// rather than the historical `false`. Opt-in via the convar
+// `mysql_bit_full_integer` (default false) so 3.1.0 deployments keep
+// the pinned behaviour on upgrade. See compat-matrix §4.4.
+export let mysql_bit_full_integer = false;
+
 export function updateConfig(config: {
   mysql_debug: boolean | string[];
   mysql_slow_query_warning: number;
@@ -21,6 +28,10 @@ export function updateConfig(config: {
 
 export function setIsolationLevel(level: string) {
   mysql_transaction_isolation_level = level;
+}
+
+export function setBitFullInteger(enabled: boolean) {
+  mysql_bit_full_integer = Boolean(enabled);
 }
 
 export function initNamedPlaceholders(optionValue: unknown) {
