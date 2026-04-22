@@ -10,6 +10,7 @@ DROP TABLE IF EXISTS t_strings;
 DROP TABLE IF EXISTS t_bulk;
 DROP TABLE IF EXISTS t_uids;
 DROP TABLE IF EXISTS t_json;
+DROP TABLE IF EXISTS t_qbx_props;
 
 CREATE TABLE t_basic (
   id          INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -73,3 +74,21 @@ CREATE TABLE t_json (
   payload     JSON NULL,
   notes       LONGTEXT NULL -- fallback for servers that reject JSON as a distinct column type
 ) ENGINE=InnoDB;
+
+-- Reproduces the qbx_properties table shape verbatim (charset, collate,
+-- JSON-NOT-NULL with DEFAULT(JSON_OBJECT()), owner varchar with explicit
+-- utf8mb4_unicode_ci collate) so cluster 14 pins JSON behaviour under the
+-- exact conditions a real consumer will hit.
+CREATE TABLE t_qbx_props (
+  id               INT NOT NULL AUTO_INCREMENT,
+  property_name    VARCHAR(255) NOT NULL,
+  coords           JSON NOT NULL,
+  price            INT NOT NULL DEFAULT 0,
+  owner            VARCHAR(50) COLLATE utf8mb4_unicode_ci,
+  interior         VARCHAR(255) NOT NULL,
+  keyholders       JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  rent_interval    INT DEFAULT NULL,
+  interact_options JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  stash_options    JSON NOT NULL DEFAULT (JSON_OBJECT()),
+  PRIMARY KEY (id)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

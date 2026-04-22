@@ -1,8 +1,21 @@
 import { build } from 'esbuild';
+import { execSync } from 'child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 
 const packageJson = JSON.parse(readFileSync('package.json', { encoding: 'utf8' }));
 const version = process.env.TGT_RELEASE_VERSION;
+
+// Build stamp — short git commit hash if available, otherwise 'dev'. Printed
+// in the server-startup banner so operators can confirm which build is
+// actually running on their FXServer (file caching, failed zip extraction,
+// and wrong-directory deployments all produce "fix didn't apply" symptoms
+// that this banner makes trivially diagnosable).
+let buildStamp;
+try {
+  buildStamp = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+} catch {
+  buildStamp = 'dev';
+}
 
 if (version) {
   packageJson.version = version.replace('v', '');
@@ -80,6 +93,9 @@ const sharedConfig = {
   target: ['node22'],
   format: 'cjs',
   logLevel: 'info',
+  define: {
+    __BUILD_STAMP__: JSON.stringify(buildStamp),
+  },
 };
 
 build({

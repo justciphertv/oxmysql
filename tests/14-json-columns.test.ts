@@ -73,4 +73,65 @@ describe('cluster 14 — JSON columns return as strings', () => {
     expect(JSON.parse(row.payload as string)).toEqual({ q: 42 });
     expect(row.notes).toBe('note');
   });
+
+  // Faithful reproduction of the qbx_properties consumer pattern: a table
+  // declared with the exact charset, collate, and JSON NOT NULL DEFAULT
+  // (JSON_OBJECT()) shape reported in the field, selected via single() the
+  // way the Lua wrapper ultimately does. If this returns anything other
+  // than strings, the typeCast fix is insufficient.
+  it('qbx_properties-shaped table returns every JSON column as a string', async () => {
+    await getPool().query('TRUNCATE t_qbx_props');
+
+    await getPool().query(
+      `INSERT INTO t_qbx_props (property_name, coords, price, interior, keyholders, interact_options, stash_options) ` +
+        `VALUES ('casa', '{"x":1.5,"y":-2.3,"z":30.0}', 10000, 'interior_name', ` +
+        `'{"abc":true}', '{"points":[1,2,3]}', '{"stashes":{"main":"id1"}}')`,
+    );
+
+    const row = unwrap(
+      await rawQuery(
+        'single',
+        'test',
+        'SELECT property_name, coords, price, interior, keyholders, interact_options, stash_options FROM t_qbx_props LIMIT 1',
+        [],
+      ),
+    ) as Record<string, unknown>;
+
+    // Every JSON column must be a string so the Lua consumer can json.decode.
+    for (const col of ['coords', 'keyholders', 'interact_options', 'stash_options']) {
+      expect(typeof row[col]).toBe('string');
+      expect(() => JSON.parse(row[col] as string)).not.toThrow();
+    }
+
+    // Sanity: non-JSON columns unaffected.
+    expect(row.property_name).toBe('casa');
+    expect(row.interior).toBe('interior_name');
+    expect(row.price).toBe(10000);
+  });
+
+  // Exercise the DEFAULT (JSON_OBJECT()) path. When a row is inserted without
+  // explicitly providing the JSON columns, MariaDB evaluates JSON_OBJECT()
+  // at insert time. On read, those values must still come back as strings
+  // (the string "{}") — not as JS objects.
+  it('DEFAULT (JSON_OBJECT()) values read back as the string "{}"', async () => {
+    await getPool().query('TRUNCATE t_qbx_props');
+    await getPool().query(
+      `INSERT INTO t_qbx_props (property_name, coords, interior) ` +
+        `VALUES ('default-test', '{}', 'i')`,
+    );
+
+    const row = unwrap(
+      await rawQuery(
+        'single',
+        'test',
+        'SELECT keyholders, interact_options, stash_options FROM t_qbx_props WHERE property_name = ?',
+        ['default-test'],
+      ),
+    ) as Record<string, unknown>;
+
+    for (const col of ['keyholders', 'interact_options', 'stash_options']) {
+      expect(typeof row[col]).toBe('string');
+      expect(row[col]).toBe('{}');
+    }
+  });
 });

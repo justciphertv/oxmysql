@@ -5,6 +5,7 @@ import { typeCast } from '../utils/typeCast';
 import { print } from '../utils/events';
 import { parentPort } from 'worker_threads';
 import { sleep } from '../utils/sleep';
+import { BUILD_STAMP } from '../build-stamp';
 
 export let pool: Pool | null = null;
 export let dbVersion = '';
@@ -48,7 +49,9 @@ export async function createConnectionPool(options: PoolConfig) {
     const result = await dbPool.query<Array<{ version: string }>>('SELECT VERSION() as version');
     dbVersion = `^5[${result[0].version}]`;
 
-    print(`${dbVersion} ^2Database server connection established!^0`);
+    print(
+      `${dbVersion} ^2Database server connection established!^0 ^7[oxmysql-mariadb-patch ${BUILD_STAMP}]^0`,
+    );
     parentPort!.postMessage({ action: 'dbVersion', data: dbVersion });
 
     if (options.multipleStatements) {
