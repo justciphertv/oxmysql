@@ -466,6 +466,32 @@ Phase 4 does not run in the FXServer runtime; this contract is documented here a
 
 ---
 
+## 10.4 Connection string parsing (`mysql_connection_string`)
+
+Two accepted forms: URI (`mysql://user:pass@host:port/database?opt=val`) and semicolon-delimited key-value (`user=root;password=secret;host=localhost;database=app`).
+
+The URI form's **port** field is validated. Accepted shapes:
+
+| Input | Resulting `port` | Warning fires? |
+|-------|------------------|----------------|
+| Valid digit-string in `[1, 65535]` (e.g. `:3306`) | `number` | no |
+| Omitted (e.g. `mysql://user@host/db`) | `undefined` (mariadb defaults to 3306) | no |
+| Non-numeric (e.g. `:abc`) | `undefined` (mariadb defaults to 3306) | **yes** |
+| Out of range (`0`, `70000`, …) | `undefined` (mariadb defaults to 3306) | **yes** |
+
+The **effective pool behavior** is unchanged from the pre-audit-M5 code — an invalid port still falls back to 3306. The added warning makes the misconfiguration visible in the FXServer console so operators can correct it.
+
+Key-value form normalises aliased keys to canonical names at parse time:
+
+| Alias | Normalises to |
+|-------|---------------|
+| `host`, `hostname`, `ip`, `server`, `data source`, `addr`, `address` | `host` |
+| `user`, `userid`, `user id`, `username`, `user name`, `uid` | `user` |
+| `pwd`, `pass` | `password` |
+| `db` | `database` |
+
+> **[PINNED by tests/19-connection-string.test.ts]** All of the above, including the two-warn branches and the k=v alias normalisation.
+
 ## 11. Out-of-spec behavior (will not be tested)
 
 These are intentional non-goals; Phase 4 will not add tests for them, and they are *not* part of the compatibility contract:
