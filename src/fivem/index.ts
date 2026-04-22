@@ -251,7 +251,21 @@ worker.postMessage({
 });
 
 readConfig();
-setInterval(readConfig, 1000);
+// Subscribe to convar changes instead of polling every 1s. FXServer
+// fires the listener when any matching convar changes via the console
+// or SetConvar. The `mysql_*` filter catches every convar readConfig
+// reads plus the ones it does not (bootstrap-only like
+// mysql_connection_string); firing readConfig on any of them is cheap
+// and keeps the handler logic in one place. Audit item H1.
+if (typeof AddConvarChangeListener === 'function') {
+  AddConvarChangeListener('mysql_*', () => readConfig());
+} else {
+  // Extremely old FXServer artifact without AddConvarChangeListener —
+  // fall back to the pre-3.2.0 1s poll so convar changes are still
+  // picked up. Release workflow declares /server:12913 and later which
+  // always exposes the native, but keep the fallback for safety.
+  setInterval(readConfig, 1000);
+}
 
 // ─── oxmysql_debug command ────────────────────────────────────────────────────
 
