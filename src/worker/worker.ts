@@ -5,13 +5,49 @@ import { rawQuery } from './database/rawQuery';
 import { rawExecute } from './database/rawExecute';
 import { rawTransaction } from './database/rawTransaction';
 import { beginTransaction, runTransactionQuery, endTransaction } from './database/startTransaction';
-import { sendResponse } from './utils/events';
+import { print, sendResponse } from './utils/events';
 import { sleep } from './utils/sleep';
 import type { QueryType, TransactionQuery, CFXParameters } from '../types';
 
-parentPort!.on('message', async (message: { action: string; id?: number; data: any }) => {
-  const { action, id, data } = message;
+// All worker-side dispatch errors are surfaced as:
+//   - an `{ error }` response to the originating request (if it had an id)
+//   - a print() diagnostic to the FXServer console
+// The worker itself is NOT allowed to crash out of this handler. Historically
+// a bad payload or unexpected throw inside any case arm tore down the worker,
+// after which every subsequent query hung forever on the parent side. The
+// parent's exit handler (Phase 5.1) now drains pending on exit, but
+// preventing the crash in the first place is the better primitive: it keeps
+// the resource functional for every non-poisoned request.
 
+export async function handleIncoming(message: {
+  action: string;
+  id?: number;
+  data: any;
+}) {
+  const { action, id, data } = message ?? ({} as { action: string; id?: number; data: any });
+
+  try {
+    await dispatch(action, id, data);
+  } catch (err: any) {
+    const reason = err?.message ?? String(err);
+    try {
+      print(`^1[oxmysql worker] dispatch failed for action='${action}': ${reason}^0`);
+    } catch {
+      /* parentPort may be unavailable if we are mid-shutdown */
+    }
+    if (id !== undefined) {
+      try {
+        sendResponse(id, { error: `oxmysql worker dispatch failed: ${reason}` });
+      } catch {
+        /* same guard as above */
+      }
+    }
+  }
+}
+
+parentPort!.on('message', handleIncoming);
+
+async function dispatch(action: string, id: number | undefined, data: any) {
   switch (action) {
     case 'initialize': {
       const { connectionOptions, mysql_transaction_isolation_level, mysql_debug, namedPlaceholders } = data;
@@ -106,4 +142,4 @@ parentPort!.on('message', async (message: { action: string; id?: number; data: a
       break;
     }
   }
-});
+}
