@@ -47,4 +47,14 @@ describe('cluster 18 — graceful shutdown (§5.4)', () => {
     // Match: try { await pool?.end(); } catch { … } — whitespace tolerant.
     expect(workerSrc).toMatch(/try \{[\s\S]*?await pool\?\.end\(\)/);
   });
+
+  it('shutdown case does not fall through to any future case below it', () => {
+    // Explicit return after process.exit(0) — the return is unreachable
+    // but documents the no-fallthrough contract and prevents a future
+    // case appended below 'shutdown' from accidentally running if the
+    // exit is ever removed.
+    expect(workerSrc).toMatch(
+      /case 'shutdown':[\s\S]*?process\.exit\(0\);[\s\S]*?return;/,
+    );
+  });
 });

@@ -216,6 +216,11 @@ async function dispatch(action: string, id: number | undefined, data: any) {
         /* pool may already be torn down */
       }
       process.exit(0);
+      // Unreachable — process.exit(0) terminates the worker — but the
+      // explicit return makes it obvious to reviewers and linters that
+      // this case does not fall through to whatever might be appended
+      // after it in future edits.
+      return;
     }
   }
 }
