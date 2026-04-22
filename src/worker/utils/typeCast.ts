@@ -1,5 +1,6 @@
 import type { FieldInfo, TypeCastNextFunction, TypeCastFunction, TypeCastResult } from 'mariadb';
 import { parentPort } from 'worker_threads';
+import * as workerConfig from '../config';
 import { mysql_bit_full_integer } from '../config';
 
 /**
@@ -79,19 +80,13 @@ function diag(
   }
 }
 
-const DIAG_ENABLED = () =>
-  process.env.OXMYSQL_DIAG === '1' ||
-  // Lazy so we pick up mysql_debug convar changes at runtime without
-  // adding a circular import — we read from config module only when needed.
-  (() => {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { mysql_debug } = require('../config');
-      return !!mysql_debug;
-    } catch {
-      return false;
-    }
-  })();
+// Evaluated once at module load; OXMYSQL_DIAG cannot be flipped at
+// runtime without a worker restart anyway (it is an env var, not a
+// convar). The mysql_debug half of the check reads the live binding
+// from the config module so it picks up updateConfig() mutations
+// without the lazy-require trick the pre-B2 implementation used.
+const DIAG_ENV = process.env.OXMYSQL_DIAG === '1';
+const DIAG_ENABLED = () => DIAG_ENV || !!workerConfig.mysql_debug;
 
 /**
  * mariadb-compatible typecasting (mysql-async compatible).
