@@ -153,13 +153,32 @@ Every query export supports three invocation modes. All three must remain valid;
   - `queryFn(sql, values)` runs a single statement on the transaction's dedicated connection and returns the raw connector result (the same shape `MySQL.query` returns).
   - The outer function must return a truthy value to commit, or literally `false` to roll back.
   - Throws inside the outer function also roll back.
-  - A 30-second wall-clock timeout fires a rollback via `endTransaction` and marks the transaction closed; any subsequent `queryFn` call from user code after timeout throws `Transaction has timed out after 30 seconds.`
+  - A 30-second wall-clock timeout fires a rollback via `endTransaction` and marks the transaction closed. Every `queryFn` call from user code that observes the aborted signal (either before or after its `sendToWorker` roundtrip completes) throws `Transaction has timed out after 30 seconds.` An `AbortController` plus a worker-side `closed` flag together guarantee that **no new query is started on a torn-down connection** and that the `endTransaction` rollback does not overlap a still-in-flight query — the 3.1.0 M1 race is fixed in 3.2.0 as an unconditional correctness change.
 - **Output:** `true` if committed, `false` if rolled back.
-- Still emits a "experimental" console warning *once per process lifetime* (changed in Phase 2 from once-per-call).
+- Still emits a "experimental" console warning *once per process lifetime*.
 
-> **[PHASE-4]** Pin three paths: commit, caller-returns-false → rollback, timeout → rollback. Additionally, confirm the known race: a `queryFn` call that races with the 30 s timer should either succeed or throw the timeout error — it must not leave state on the now-released pool connection. This is audit item M1.
+> **[PINNED by tests/09-start-transaction.test.ts]** M1 race guard — `runTransactionQuery` after `endTransaction` has closed the connection returns an `{ error }` payload instead of starting fresh work.
 
-> **[PHASE-4]** Pin: commit errors in `endTransaction` are currently swallowed (`catch {}` at `startTransaction.ts:57`). `MySQL.startTransaction` still returns `true` in that case. Test must lock this as the observed behavior so a future fix (propagating commit errors) is a deliberate, documented change.
+#### 2.9.1 `mysql_start_transaction_propagate_errors` convar
+
+**Default:** `false` (preserves 3.1.0 pinned behaviour).
+**Scope:** affects only `MySQL.startTransaction` / `endTransaction`. `MySQL.transaction`, `rawTransaction`, and every other export are untouched.
+
+| Flag value | `beginTransaction` failure | Commit / rollback failure | Default shape |
+|------------|----------------------------|---------------------------|---------------|
+| `false` (default) | `console.error(...)` + return `false` | Silently swallowed (`catch {}` on the worker side returns `{ result: true }`); `MySQL.startTransaction` returns `true` | boolean return |
+| `true` | Throws `Error(<worker reason>)` | Throws `Error('<resource> startTransaction <commit\|rollback> failed: <reason>')` | boolean return on success, `throw` on begin/commit/rollback failure |
+
+Under `false`, the function shape is byte-for-byte identical to 3.1.0. Under `true`:
+- A failed `beginTransaction` throws; callers should wrap in `try/catch` or `pcall`.
+- A failed commit or rollback throws; the outer `MySQL.startTransaction` promise rejects.
+- A timed-out transaction still returns `false` (the timeout handler has already processed the rollback before the caller's await resolves).
+
+Worker-side plumbing is unconditional: `endTransaction` always returns `{ result: true } | { error: string }`. The parent chooses whether to dispatch it as `sendToWorker` (request-response, flag-on) or `emitToWorker` (fire-and-forget, flag-off).
+
+> **[PINNED by tests/09-start-transaction.test.ts]** `endTransaction` returns `{ result: true }` on success and `{ error: string }` on commit/rollback failure. Unknown `connectionId` resolves to `{ result: true }` (no-op).
+
+> **[MANUAL VERIFICATION]** The flag-on `MySQL.startTransaction` throw path lives in `src/fivem/index.ts` and is not reachable from the worker-internals harness. Operators enabling the convar should verify with a live FXServer test.
 
 ### 2.10 `MySQL.store`
 
