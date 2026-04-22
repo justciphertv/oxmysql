@@ -5,7 +5,7 @@ import { rawQuery } from './database/rawQuery';
 import { rawExecute } from './database/rawExecute';
 import { rawTransaction } from './database/rawTransaction';
 import { beginTransaction, runTransactionQuery, endTransaction } from './database/startTransaction';
-import { print, sendResponse } from './utils/events';
+import { print, sendResponse, triggerFivemEvent } from './utils/events';
 import { sleep } from './utils/sleep';
 import type { QueryType, TransactionQuery, CFXParameters } from '../types';
 
@@ -64,10 +64,34 @@ async function dispatch(action: string, id: number | undefined, data: any) {
         mysql_log_size: 100,
       });
 
-      // Retry pool creation until successful
+      // Retry pool creation until successful. Every failed attempt emits
+      // visible telemetry so operators can see why the server is stuck and
+      // an oxmysql:error event so monitoring resources can react. The retry
+      // interval is tunable via mysql_init_retry_ms; default preserves the
+      // pre-Phase-5.3 30s cadence.
+      const retryIntervalMs = Math.max(1_000, Number(data?.mysql_init_retry_ms) || 30_000);
+      let attempt = 0;
       while (!pool) {
+        attempt += 1;
         await createConnectionPool(connectionOptions);
-        if (!pool) await sleep(30000);
+        if (pool) break;
+
+        print(
+          `^3[oxmysql] connection attempt ${attempt} failed; retrying in ${retryIntervalMs / 1000}s^0`,
+        );
+        triggerFivemEvent('oxmysql:error', {
+          phase: 'init',
+          attempt,
+          retryIntervalMs,
+          message: `connection attempt ${attempt} failed`,
+        });
+
+        await sleep(retryIntervalMs);
+      }
+
+      if (attempt > 1) {
+        print(`^2[oxmysql] connection established on attempt ${attempt}^0`);
+        triggerFivemEvent('oxmysql:ready', { phase: 'init', attempt });
       }
 
       break;

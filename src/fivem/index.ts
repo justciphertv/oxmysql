@@ -243,6 +243,11 @@ const mysql_transaction_isolation_level = `SET TRANSACTION ISOLATION LEVEL ${
   isolationLevelMap[isolationLevel] ?? 'READ COMMITTED'
 }`;
 
+// Retry interval for the worker's pool-creation loop. Default matches the
+// pre-Phase-5.3 cadence (30 s). Operators on a fast-bring-up VPS can
+// shorten it; clamped to >= 1s worker-side.
+const mysql_init_retry_ms = GetConvarInt('mysql_init_retry_ms', 30_000);
+
 const connectionOptions = buildConnectionOptions();
 
 // Extract and remove the sentinel before sending options to the mariadb pool.
@@ -253,6 +258,7 @@ worker.postMessage({
   data: {
     connectionOptions: poolOptions,
     mysql_transaction_isolation_level,
+    mysql_init_retry_ms,
     mysql_debug: false,
     namedPlaceholders: userNamedPlaceholders,
   },
