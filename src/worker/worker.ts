@@ -165,5 +165,17 @@ async function dispatch(action: string, id: number | undefined, data: any) {
       await endTransaction(connectionId, commit);
       break;
     }
+
+    case 'shutdown': {
+      // Flush the pool so no half-open connections linger on the server.
+      // Exit explicitly so FXServer's worker.terminate() fallback (2s
+      // grace window) only fires if pool.end() stalls.
+      try {
+        await pool?.end();
+      } catch {
+        /* pool may already be torn down */
+      }
+      process.exit(0);
+    }
   }
 }

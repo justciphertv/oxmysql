@@ -129,6 +129,29 @@ worker.on('error', (err) => {
   }
 });
 
+// Graceful teardown. When the resource stops (server shutdown, `restart
+// oxmysql`, etc.) ask the worker to flush the pool and exit cleanly, then
+// terminate the worker after a short grace window if it has not already
+// exited. Without this, FXServer leaves the worker's connections dangling
+// until the process tears them down — observable as orphan MariaDB
+// sessions between hot-restarts.
+const SHUTDOWN_GRACE_MS = 2000;
+on(`onResourceStop`, (stoppedResource: string) => {
+  if (stoppedResource !== resourceName) return;
+  try {
+    channel.emit('shutdown');
+  } catch {
+    /* worker already gone; terminate below will no-op */
+  }
+  setTimeout(() => {
+    try {
+      worker.terminate();
+    } catch {
+      /* already terminated */
+    }
+  }, SHUTDOWN_GRACE_MS);
+});
+
 worker.on('exit', (code) => {
   // The WorkerChannel's own exit handler drains pending requests with
   // synthesized errors. This listener is only for operator-visible logging
