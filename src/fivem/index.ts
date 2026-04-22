@@ -4,6 +4,7 @@ import type { CFXCallback, CFXParameters, TransactionQuery } from '../types';
 import ghmatti from '../compatibility/ghmattimysql';
 import mysqlAsync from '../compatibility/mysql-async';
 import { WorkerChannel } from './channel';
+import { buildConnectionOptions as buildConnectionOptionsFromString } from './connection-string';
 import('../update');
 
 // ─── Worker setup ────────────────────────────────────────────────────────────
@@ -169,70 +170,11 @@ worker.on('exit', (code) => {
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-function parseUri(connectionString: string) {
-  const match = connectionString.match(
-    new RegExp(
-      '^(?:([^:/?#.]+):)?(?://(?:([^/?#]*)@)?([\\w\\d\\-\\u0100-\\uffff.%]*)(?::([0-9]+))?)?([^?#]+)?(?:\\?([^#]*))?$'
-    )
-  ) as RegExpMatchArray;
-
-  if (!match) throw new Error(`mysql_connection_string structure was invalid (${connectionString})`);
-
-  const authTarget = match[2] ? match[2].split(':') : [];
-
-  return {
-    user: authTarget[0] || undefined,
-    password: authTarget[1] || undefined,
-    host: match[3],
-    port: parseInt(match[4]),
-    database: match[5]?.replace(/^\/+/, ''),
-    ...(match[6] &&
-      match[6].split('&').reduce<Record<string, string>>((acc, param) => {
-        const [key, value] = param.split('=');
-        if (key && value) acc[key] = value;
-        return acc;
-      }, {})),
-  };
-}
-
 function buildConnectionOptions() {
   const mysql_connection_string = GetConvar('mysql_connection_string', '');
-
-  const raw: Record<string, any> = mysql_connection_string.includes('mysql://')
-    ? parseUri(mysql_connection_string)
-    : mysql_connection_string
-        .replace(/(?:host(?:name)|ip|server|data\s?source|addr(?:ess)?)=/gi, 'host=')
-        .replace(/(?:user\s?(?:id|name)?|uid)=/gi, 'user=')
-        .replace(/(?:pwd|pass)=/gi, 'password=')
-        .replace(/(?:db)=/gi, 'database=')
-        .split(';')
-        .reduce<Record<string, string>>((acc, param) => {
-          const [key, value] = param.split('=');
-          if (key) acc[key] = value;
-          return acc;
-        }, {});
-
-  for (const key of ['ssl']) {
-    if (typeof raw[key] === 'string') {
-      try {
-        raw[key] = JSON.parse(raw[key]);
-      } catch {
-        console.log(`^3Failed to parse property ${key} in configuration!^0`);
-      }
-    }
-  }
-
-  // Preserve the user's namedPlaceholders preference (string 'false' means they opted out)
-  // before we set namedPlaceholders:false on the pool to disable mariadb's own handling.
-  const userNamedPlaceholders = raw.namedPlaceholders;
-
-  return {
-    connectTimeout: 60000,
-    bigIntAsNumber: true,
-    ...raw,
-    namedPlaceholders: false, // disable mariadb's built-in handling; we do it ourselves
-    _userNamedPlaceholders: userNamedPlaceholders,
-  };
+  return buildConnectionOptionsFromString(mysql_connection_string, (msg) =>
+    console.log(`^3${msg}^0`),
+  );
 }
 
 function readConfig() {
