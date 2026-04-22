@@ -213,6 +213,16 @@ const mysql_transaction_isolation_level = `SET TRANSACTION ISOLATION LEVEL ${
 // shorten it; clamped to >= 1s worker-side.
 const mysql_init_retry_ms = GetConvarInt('mysql_init_retry_ms', 30_000);
 
+// Opt-in propagation of commit / rollback failures from
+// `MySQL.startTransaction`. Default preserves the pinned 3.1.0 behaviour
+// (commit errors are swallowed; the function returns a plain boolean).
+// When set to 'true', an endTransaction that fails on the commit or
+// rollback causes MySQL.startTransaction to throw an Error containing
+// the worker-reported reason. Only affects MySQL.startTransaction /
+// endTransaction; MySQL.transaction and every other API are unchanged.
+const mysql_start_transaction_propagate_errors =
+  GetConvar('mysql_start_transaction_propagate_errors', 'false') === 'true';
+
 const connectionOptions = buildConnectionOptions();
 
 // Extract and remove the sentinel before sending options to the mariadb pool.
@@ -491,6 +501,8 @@ MySQL.transaction = (
   );
 };
 
+const START_TRANSACTION_TIMEOUT_MS = 30_000;
+
 let startTransactionWarned = false;
 MySQL.startTransaction = async (
   transactions: (queryFn: (sql: string, values: CFXParameters) => Promise<any>) => Promise<boolean>,
@@ -506,22 +518,63 @@ MySQL.startTransaction = async (
   });
 
   if ('error' in beginResult) {
+    if (mysql_start_transaction_propagate_errors) {
+      throw new Error(beginResult.error);
+    }
     console.error(beginResult.error);
     return false;
   }
 
   const { connectionId } = beginResult;
   let commit = false;
-  let closed = false;
+  // `finalized` guards against double-finalization when the timeout
+  // handler and the normal completion path both try to send
+  // endTransaction. Whichever runs first wins.
+  let finalized = false;
+
+  // AbortController drives the race-free queryFn gate (audit M1). The
+  // abort signal is raised either on timeout or after a final
+  // endTransaction has been dispatched; queryFn checks it before AND
+  // after every sendToWorker call so an in-flight response that lands
+  // after the rollback does not silently succeed.
+  const ac = new AbortController();
+  const signal = ac.signal;
+
+  async function finalize(withCommit: boolean): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (finalized) return { ok: true };
+    finalized = true;
+    if (mysql_start_transaction_propagate_errors) {
+      // Request-response variant so the parent learns about a failed
+      // commit / rollback and can surface it.
+      const resp = await sendToWorker<{ result: true } | { error: string }>('endTransaction', {
+        connectionId,
+        commit: withCommit,
+      });
+      if ('error' in resp) return { ok: false, error: resp.error };
+      return { ok: true };
+    }
+    // Default path — fire-and-forget, preserves 3.1.0 behaviour.
+    emitToWorker('endTransaction', { connectionId, commit: withCommit });
+    return { ok: true };
+  }
 
   const timeout = setTimeout(() => {
-    closed = true;
-    emitToWorker('endTransaction', { connectionId, commit: false });
-  }, 30000);
+    if (finalized) return;
+    ac.abort();
+    // Best-effort rollback; errors here cannot be surfaced through the
+    // original MySQL.startTransaction return because the caller has
+    // already long since moved on or will throw via the signal gate.
+    finalize(false).then((res) => {
+      if (!res.ok) {
+        console.error(`${invokingResource} startTransaction timed out and rollback failed: ${res.error}`);
+      }
+    });
+  }, START_TRANSACTION_TIMEOUT_MS);
 
   try {
     const queryFn = async (sql: string, values: CFXParameters) => {
-      if (closed) throw new Error('Transaction has timed out after 30 seconds.');
+      if (signal.aborted)
+        throw new Error('Transaction has timed out after 30 seconds.');
 
       const result = await sendToWorker<{ result: any } | { error: string }>('transactionQuery', {
         invokingResource,
@@ -529,6 +582,12 @@ MySQL.startTransaction = async (
         sql,
         values,
       });
+
+      // Second check: the timeout may have fired while sendToWorker was
+      // awaiting the worker. Surface as an abort so the caller knows the
+      // result was discarded.
+      if (signal.aborted)
+        throw new Error('Transaction has timed out after 30 seconds.');
 
       if ('error' in result) throw new Error(result.error);
       return result.result;
@@ -538,12 +597,39 @@ MySQL.startTransaction = async (
     commit = outcome !== false;
   } catch (err: any) {
     commit = false;
-    console.error(`${invokingResource} startTransaction failed: ${err.message}`);
-  } finally {
-    if (!closed) {
-      clearTimeout(timeout);
-      emitToWorker('endTransaction', { connectionId, commit });
+    // The timeout path has already handled its own rollback; only log
+    // if the caller threw for a different reason. In the propagate-
+    // errors flavour we still want the caller to see the error.
+    if (!signal.aborted) {
+      const message = err?.message ?? String(err);
+      console.error(`${invokingResource} startTransaction failed: ${message}`);
     }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (signal.aborted) {
+    // Timeout handler already finalized the transaction. Return false to
+    // the caller so they know the transaction did not commit. This is
+    // NOT a propagate-errors opportunity — the caller's own await has
+    // resolved normally; throwing here would be a surprise.
+    return false;
+  }
+
+  const finalizeResult = await finalize(commit);
+  if (!finalizeResult.ok) {
+    if (mysql_start_transaction_propagate_errors) {
+      throw new Error(
+        `${invokingResource} startTransaction ${commit ? 'commit' : 'rollback'} failed: ${finalizeResult.error}`,
+      );
+    }
+    // Default path: we shouldn't reach here because finalize() only
+    // populates `ok: false` when the flag is set, but handle it
+    // defensively. Log and fall through to the normal return.
+    console.error(
+      `${invokingResource} startTransaction ${commit ? 'commit' : 'rollback'} failed: ${finalizeResult.error}`,
+    );
+    return false;
   }
 
   return commit;
