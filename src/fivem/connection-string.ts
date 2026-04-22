@@ -47,9 +47,9 @@ export function parseUri(
 
   // The URI regex only captures digits into match[4], so any non-digit
   // port string (`:abc`) causes the port segment not to match at all and
-  // the character run falls into match[5] (the path). Detect this shape
-  // explicitly so operators see a clear diagnostic instead of a silent
-  // connect-on-3306 fallback.
+  // the character run falls into match[5] (the path) prefixed with a
+  // literal colon. Detect this shape explicitly so operators see a clear
+  // diagnostic instead of a silent connect-on-3306 fallback.
   const rawPort = match[4];
   let port: number | undefined;
   if (rawPort) {
@@ -58,9 +58,11 @@ export function parseUri(
     if (port === undefined) {
       warn(`mysql_connection_string has an invalid port (${rawPort}); defaulting to 3306.`);
     }
-  } else if (/:[^/?]*\//.test(connectionString) && !/:\d+\//.test(connectionString)) {
-    // A `:xxx/` segment exists but did not match the port regex — means
-    // the user wrote a non-numeric port. Warn once.
+  } else if (match[5]?.startsWith(':')) {
+    // User tried to specify a port that was rejected by the digit-only
+    // capture group and therefore fell into the path. Example:
+    //   mysql://root@host:abc/db
+    //   -> match[3]='host', match[4]=undefined, match[5]=':abc/db'
     warn(
       `mysql_connection_string has a port value that is not a valid number; defaulting to 3306.`,
     );
