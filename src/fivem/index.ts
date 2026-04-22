@@ -3,6 +3,7 @@ import path from 'path';
 import type { CFXCallback, CFXParameters, TransactionQuery } from '../types';
 import ghmatti from '../compatibility/ghmattimysql';
 import mysqlAsync from '../compatibility/mysql-async';
+import { WorkerChannel } from './channel';
 import('../update');
 
 // ─── Worker setup ────────────────────────────────────────────────────────────
@@ -11,20 +12,31 @@ const resourceName = GetCurrentResourceName();
 const resourcePath = GetResourcePath(resourceName);
 const worker = new Worker(path.join(resourcePath, 'dist/worker.js'));
 
-// FiveM → Worker request/response plumbing
-let nextRequestId = 0;
-const pendingRequests = new Map<number, (data: any) => void>();
+// Opt-in per-request timeout. 0 = feature disabled, every request stays
+// pending until answered (matches the pre-Phase-5 contract pinned in
+// compat-matrix §10.3). When set, a request that has not received a
+// response in this many ms resolves with an `{ error }` payload and emits
+// an `oxmysql:error` event with `phase: 'timeout'`.
+const mysql_request_timeout_ms = GetConvarInt('mysql_request_timeout_ms', 0);
+
+const channel = new WorkerChannel(worker, {
+  defaultTimeoutMs: mysql_request_timeout_ms,
+  onSynthesizedError: ({ action, reason }) => {
+    console.error(reason);
+    try {
+      emit('oxmysql:error', { phase: 'timeout', action, message: reason });
+    } catch {
+      /* ignore — emit may be unavailable if resource is mid-shutdown */
+    }
+  },
+});
 
 function sendToWorker<T = any>(action: string, data: any): Promise<T> {
-  return new Promise((resolve) => {
-    const id = nextRequestId++;
-    pendingRequests.set(id, resolve);
-    worker.postMessage({ action, id, data });
-  });
+  return channel.send<T>(action, data);
 }
 
 function emitToWorker(action: string, data?: any): void {
-  worker.postMessage({ action, data });
+  channel.emit(action, data);
 }
 
 // ─── Logger state (requires FiveM APIs) ──────────────────────────────────────
@@ -66,9 +78,7 @@ worker.on('message', (message: { action: string; id?: number; data: any }) => {
   const { action, id, data } = message;
 
   if (action === 'response' && id !== undefined) {
-    const resolve = pendingRequests.get(id);
-    resolve?.(data);
-    pendingRequests.delete(id);
+    channel.deliver(id, data);
     return;
   }
 
@@ -109,6 +119,29 @@ worker.on('message', (message: { action: string; id?: number; data: any }) => {
 
 worker.on('error', (err) => {
   console.error('oxmysql worker error:', err);
+  try {
+    emit('oxmysql:error', {
+      phase: 'worker',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  } catch {
+    /* ignore */
+  }
+});
+
+worker.on('exit', (code) => {
+  // The WorkerChannel's own exit handler drains pending requests with
+  // synthesized errors. This listener is only for operator-visible logging
+  // so the failure mode is obvious in the FXServer console.
+  console.error(
+    `^1[oxmysql] worker exited (code ${code}). All in-flight queries rejected. ` +
+      `Restart the resource to re-spawn the worker.^0`,
+  );
+  try {
+    emit('oxmysql:error', { phase: 'worker-exit', code });
+  } catch {
+    /* ignore */
+  }
 });
 
 // ─── Config ───────────────────────────────────────────────────────────────────
