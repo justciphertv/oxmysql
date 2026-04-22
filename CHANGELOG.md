@@ -2,7 +2,70 @@
 
 All notable changes to this fork. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers are semver; minor bumps imply additive changes, patch bumps imply bug fixes, and major bumps would imply a break in the public Lua / FiveM export surface (none so far — the fork is strictly backward-compatible with upstream).
 
-## [3.1.0] — first formal fork release
+## [3.2.0] — 2026-04-21
+
+This release closes every High- and Medium-severity audit item opened in Phase 1 that was deferred out of 3.1.0, plus every Phase-6 post-audit finding. All consumer-facing behaviour changes land either unconditionally as correctness fixes (no consumer was getting the right answer before) or behind a convar flag defaulting to `false` (the 3.1.0 pinned behaviour is preserved on upgrade). No public Lua / FiveM export signatures, return shapes, or alias maps have narrowed; every pre-3.2.0 consumer continues to work unchanged.
+
+The compatibility spec in [`docs/compat-matrix.md`](docs/compat-matrix.md) has been updated section-by-section to reflect the new contracts; every behavioural change cross-references a regression test.
+
+### Added
+
+- **Public: `mysql_fetch` alias in the `mysql-async` export surface.** `single → mysql_fetch` was shipped by the original `mysql-async` package for a long time and some legacy resources still reference it. Additive; consumers that never used it are unaffected.
+- **Public: `insert`, `update`, `single` aliases on the `ghmattimysql` export surface.** Restores the full upstream-ghmattimysql export set. Additive.
+- **Public: `mysql_start_transaction_propagate_errors` convar.** Default `false` preserves the 3.1.0 behaviour (commit / rollback errors in `MySQL.startTransaction` are swallowed; the function returns a boolean). When `true`, a failed `beginTransaction` / commit / rollback throws an `Error` containing the invoking resource, phase, and worker-reported reason. **Scope:** affects only `MySQL.startTransaction` / `endTransaction`. `MySQL.transaction` and every other API are unchanged.
+- **Public: `mysql_bit_full_integer` convar.** Default `false` preserves 3.1.0 BIT semantics. When `true`, `BIT(n > 1)` decodes as the full big-endian integer (prefers `number` up to `Number.MAX_SAFE_INTEGER`, falls back to `bigint` beyond) and `BIT(1) NULL` returns `null` instead of `false`. BIT(1) non-null still returns `boolean` under both flag states.
+- **Internal: port-validation diagnostics on `mysql_connection_string`.** Malformed or out-of-range ports in URI form (`mysql://user@host:abc/db`, `…:70000/db`, `…:0/db`) now print a yellow warning to the FXServer console. Effective pool behaviour unchanged (mariadb still defaults to 3306); misconfiguration is just visible now.
+- **Internal: startup sanity check for the `named-placeholders` patch.** The worker exits with code 1 and emits `oxmysql:error` with `phase: 'init'` if the patched `@`-prefix / missing-key-as-null contract is not active. `named-placeholders` is now pinned to exact `1.1.3` so `patch-package` cannot silently no-op on a minor bump.
+- **Internal: 37 new regression tests across clusters 15–21** covering worker lifecycle, connection-string parsing, init telemetry, graceful shutdown, DIAG cache, and the named-placeholders patch contract. Total suite: 157/157 on MariaDB 11.
+- **`SECURITY.md`** describing the fork's trust boundary (unsafe-worker permission grant, `mysql_logger_service` JS load, `mysql_debug` log buffers) and the private security-advisory report channel.
+- **Cross-runner `postinstall`** via `scripts/postinstall.js` — `npm install` / `pnpm install` no longer fail at the postinstall step because the Bun binary is missing from PATH. Bun remains the documented recommended contributor toolchain.
+- **Fork-identity-refreshed issue templates** with build-stamp capture and a compatibility-impact checklist.
+
+### Changed
+
+- **H10 — `executeType` is now case-insensitive and tolerates leading whitespace.** `MySQL.prepare('insert into …', [[…]], true)` returns a numeric `insertId` like the uppercase form. Consumers writing lowercase DML through `prepare` were getting garbage from the SELECT-unpack path under 3.1.0; this fix aligns with compat-matrix §6.2 and is not reachable as a regression for any currently-correct caller.
+- **M1 — `MySQL.startTransaction` 30s timeout race is closed.** An `AbortController` on the parent side + a `closed` flag / `waitUntilIdle()` on the worker side together guarantee that:
+  - no new `queryFn` starts on a torn-down connection;
+  - no `endTransaction` commit / rollback runs while an in-flight query is on the same connection;
+  - a query response that lands after the timeout is discarded and the caller sees the abort error.
+  Unconditional correctness fix (no flag).
+- **M12 — `typeCast` uses a top-level `import` instead of a lazy `require`.** Uniform module-loading style; survives a future switch to native ESM emission.
+- **M13 — `case 'shutdown':` in the worker dispatch uses an explicit unreachable `return`** after `process.exit(0)` so a future case appended below it cannot fall through.
+- **M14 — Worker `initialize` is idempotent.** A second `initialize` message after pool is set re-applies the mutable config fields (isolation level, named placeholders, BIT flag, debug) but does not re-enter the retry loop. A second message while a retry loop is still running is ignored with a visible console warning.
+- **H1 — `readConfig` no longer polls.** `AddConvarChangeListener('mysql_*', …)` replaces the 1-second `setInterval`. Worker traffic on config drops from ~86k messages/day to near-zero. A 1s poll remains as a fallback for FXServer artifacts that predate the native — never triggered on the `/server:12913+` the manifest declares.
+- **O4 — `diag_enabled` cached on the config/update path.** The per-call IIFE in `typeCast` is replaced by a single property read against a cached boolean that `updateConfig` recomputes on any convar change.
+- **O5 — `fxmanifest.lua` written after esbuild succeeds.** A failed build no longer leaves a version-bumped manifest next to stale bundles.
+
+### Fixed
+
+- **M2 (flag-gated) — commit / rollback errors in `endTransaction` propagate** when `mysql_start_transaction_propagate_errors = true`. The worker always returns `{ result: true } | { error: string }`; the parent side dispatches via `sendToWorker` (request-response) under flag-on and `emitToWorker` (fire-and-forget, 3.1.0-identical) under flag-off. A failed commit / rollback destroys the tainted connection rather than returning it to the pool.
+- **M5 — `parseUri` port is no longer silently `NaN`.** Invalid or out-of-range ports are now `undefined` (so mariadb uses its 3306 default cleanly) with a console warning.
+- **H11 / M7 — incomplete `mysql-async` / `ghmattimysql` alias maps.** Restored in the Added section above.
+- **L3 — `named-placeholders` patch status is verified.** Exact version pin + startup sanity check prevents silent regressions on dependency updates.
+- **O1 — `WorkerChannel.handleExit` drain is robust to callback errors.** A throw from one pending entry's `onSynthesizedError` callback no longer prevents the remaining pending entries from settling.
+- **M9 — Bun coupling in `postinstall`.** Cross-runner script; Bun retained as recommended, npm / pnpm / yarn no longer fail.
+
+### Pinned defects (carried forward from 3.1.0 — all closed in this release)
+
+Every pinned defect from the 3.1.0 entry below is either fixed unconditionally, fixed behind a convar, or has a clear cross-reference. The current list of deliberate pinned behaviours under the defaults is shorter:
+
+- `BIGINT` / `insertId` above 2^53 precision loss (`bigIntAsNumber` / `insertIdAsNumber` pool options). Opt-out path remains on the roadmap but is not scheduled for a `3.x`.
+- `DATE` column local-timezone parsing. Run with `TZ=UTC` for DST-safe arithmetic; documented in [MIGRATION.md](MIGRATION.md) §2.
+
+### Housekeeping
+
+- `lib/package.json` — dead `prepublish: tsc` script removed.
+- `tests/fixtures/schema.sql` — `t_uids` now carries an inline header comment explaining the `TRUNCATE` / `AUTO_INCREMENT` reseed requirement that bit us in Phase 4.
+- Inherited issue templates rewritten for the fork identity.
+- `3.1.0` entry dated.
+
+### Migration
+
+No manual migration required. `convar` defaults preserve 3.1.0 behaviour. Operators who want the opt-in improvements should review the two new convars and the existing `mysql_request_timeout_ms` / `mysql_init_retry_ms` flags from 3.1.0 — see [MIGRATION.md](MIGRATION.md) §2 and §3.
+
+---
+
+## [3.1.0] — 2026-04-21 — first formal fork release
 
 This version consolidates every change that distinguishes this fork from the CommunityOx `3.0.1` baseline. All previous in-development builds (`b905fcc`, `62ea5ad`, `086a6b9`, `eaca0d4`, `8b22286`, `0d4e2ab`, `cc40a4f`) are pre-releases rolled up here.
 
