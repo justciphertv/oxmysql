@@ -1,6 +1,6 @@
 {
   "name": "oxmysql",
-  "version": "3.2.1",
+  "version": "3.3.0",
   "description": "FXServer to MariaDB communication via the mariadb connector, running in a worker thread.",
   "repository": {
     "type": "git",
@@ -25,6 +25,7 @@
     "postinstall": "node ./scripts/postinstall.js",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:smoke": "vitest run tests/smoke.test.ts",
     "test:up": "docker compose -f tests/compose.yml up -d --wait",
     "test:down": "docker compose -f tests/compose.yml down -v",
     "bench": "bun run bench/hotpath.ts",

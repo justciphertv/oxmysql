@@ -121,6 +121,19 @@ async function dispatch(action: string, id: number | undefined, data: any) {
       setBigintAsString(mysql_bigint_as_string === true);
       setDateAsUtc(mysql_date_as_utc === true);
 
+      // One-shot operator confirmation: make it obvious in the FXServer
+      // console which correctness flags are active. Only printed when at
+      // least one opt-in flag is on — keeps default deployments quiet.
+      // Fires once per `initialize` message; duplicate initialises are
+      // short-circuited above via `initializing`, so this does not spam.
+      const enabledFlags: string[] = [];
+      if (mysql_bit_full_integer === true) enabledFlags.push('mysql_bit_full_integer');
+      if (mysql_bigint_as_string === true) enabledFlags.push('mysql_bigint_as_string');
+      if (mysql_date_as_utc === true) enabledFlags.push('mysql_date_as_utc');
+      if (enabledFlags.length > 0) {
+        print(`^2[oxmysql] correctness flags active:^0 ${enabledFlags.join(', ')}`);
+      }
+
       updateConfig({
         mysql_debug,
         mysql_slow_query_warning: 200,

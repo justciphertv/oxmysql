@@ -2,6 +2,52 @@
 
 All notable changes to this fork. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers are semver; minor bumps imply additive changes, patch bumps imply bug fixes, and major bumps would imply a break in the public Lua / FiveM export surface (none so far — the fork is strictly backward-compatible with upstream).
 
+## [3.3.0] — 2026-04-23
+
+Landing release for the four post-3.2.1 improvement phases: hot-path instrumentation, pool/transaction contention characterisation, parent↔worker channel measurement, and two opt-in correctness flags for the long-standing BIGINT / DATE defects. Every behavioural change is either zero-cost-when-off instrumentation or a convar-gated opt-in; pre-existing 3.2.x deployments see byte-for-byte identical behaviour on upgrade.
+
+### Added
+
+- **Public: `mysql_bigint_as_string` convar.** Default `false` preserves the pinned lossy `Number` coercion for `BIGINT` and `insertId`. When `true`, values in the `Number.MAX_SAFE_INTEGER` safe range stay as `number`; values outside come through as decimal strings (exact digits, no precision loss). Takes effect at worker init — flips the pool's `bigIntAsNumber` / `insertIdAsNumber`, so flipping the convar requires a resource restart. Covers both signed and unsigned BIGINT. See [compat-matrix §4.1 / §4.3 / §4.1.1](docs/compat-matrix.md).
+- **Public: `mysql_date_as_utc` convar.** Default `false` preserves the historical local-timezone parse for `DATE`. When `true`, DATE columns parse as midnight UTC regardless of the FXServer host's timezone — DST-immune, 24-hour deltas always. Only affects `DATE`; `DATETIME` / `TIMESTAMP` / `TIME` / `YEAR` are unchanged. Takes effect at the next `typeCast` invocation; no pool rebuild needed. See [compat-matrix §5 / §5.1](docs/compat-matrix.md).
+- **Operator-visible: one-shot startup banner when a correctness flag is on.** The worker prints a single green line listing the active opt-in flags (`mysql_bit_full_integer`, `mysql_bigint_as_string`, `mysql_date_as_utc`) whenever one or more is enabled. Silent under defaults so existing deployments see no new console output.
+- **Internal: `OXMYSQL_PERF_TRACE=1` hot-path instrumentation.** A zero-cost-when-disabled `perf` module in `src/worker/utils/perf.ts` records per-phase `count / sum / max` for pool acquire, query execution, response shaping, transaction begin / batch / commit, and the parent↔worker channel spans. Disabled mode adds one conditional and one property read per instrumented site — measured zero effect on the vitest suite runtime. Aggregates are queryable via the new `perfSnapshot` / `perfReset` worker actions (bench-only; not on the FiveM export surface).
+- **Internal: two benchmark harnesses.** `bench/hotpath.ts` drives representative workloads through the worker's raw code paths and sweeps pool sizes (`--connectionLimits`, `--concurrencies`); `bench/channel.ts` spawns a real `worker_threads` Worker and measures postMessage round-trip latency. Usage in [docs/performance-tuning.md](docs/performance-tuning.md); `bun run bench` and `bun run bench:channel`.
+- **Internal: `docs/performance-tuning.md`.** Evidence-based operator guidance for pool sizing (with a measured connection-limit × concurrency matrix for the transaction scenario) and a parent↔worker channel characterisation showing the ~300 µs per-round-trip scheduling floor is below the worthwhile-to-optimise threshold.
+- **Internal: CI smoke matrix.** A new `smoke` job in `.github/workflows/test.yml` runs `tests/smoke.test.ts` (shape-invariant sanity assertions) under four release-blessed modes — defaults, `OXMYSQL_PERF_TRACE=1`, `mysql_bigint_as_string=1`, `mysql_date_as_utc=1` — so unexpected interactions surface before the full suite. The existing `test` job remains the release gate.
+- **Internal: 10 new regression tests.** `tests/22-bigint-as-string.test.ts` (6 tests, cluster 22, pool-reinit) covers safe-range number, over-range signed / negative string, NULL, and the insertId equivalents. `tests/06-dates.test.ts` gains a flag-on describe block (4 tests) covering DATE midnight UTC ms, DST-straddling 24h delta, NULL, and the "DATETIME is unaffected" guarantee. Total suite: 167/167 on MariaDB 11.
+- **Internal: `tests/smoke.test.ts`.** 7 tests asserting flag-invariant properties (SELECT 1 = 1, INSERT+SELECT round-trip, prepared SELECT, DATE round-trip finite, 2x-insert transaction commits both rows, NULL preservation, BIGINT > 2^53 behaves per the current flag state).
+
+### Changed
+
+- **Phase 2 — transaction code kept as-is, pool tuning documented.** The Phase 2 connection-limit sweep showed pool contention dominates transaction latency at `concurrency > connectionLimit` (~13 ms of queue wait per op at `connectionLimit=4, concurrency=16`) and collapses to ~25 µs when sized correctly. The measured transaction floor (~8.3 ms = three serial MariaDB round-trips) cannot be reduced without a connector-level protocol change. No transaction-code refactor was applied; guidance lives in [docs/performance-tuning.md](docs/performance-tuning.md) instead.
+- **Fixture `connectionLimit` bumped from 4 to 10** ([tests/helpers/env.ts](tests/helpers/env.ts:26)) to match the mariadb connector's production default. The pre-bump `4` made Phase 1 pool-wait numbers look pessimistic vs any realistic deployment. All 157 pre-bump tests continue to pass.
+- **`resetPool()` / `reinitHarness()` introduced** for bench/test pool-options sweeps. The production `pool?.end()` path in `onResourceStop` is unchanged.
+- **`rawTransaction` duplicate timer removed.** The `rawTransaction:getConnection` phase measured the same span as `getConnection:pool.getConnection` within timing noise (~5 µs). Dropped to keep perf reports uncluttered.
+
+### Fixed
+
+- **`BIGINT` / `insertId` precision above 2^53 (opt-in).** With `mysql_bigint_as_string = true`, the previously-silent truncation at the IEEE-754 safe boundary no longer occurs — values are either preserved exactly as `number` (safe range) or as decimal string (over range). Default-off preserves the pinned 3.1.0 / 3.2.x behaviour.
+- **DST-visible delta on adjacent DATE rows (opt-in).** With `mysql_date_as_utc = true`, `DATE` arithmetic is flat 24-hour regardless of the process timezone. Default-off preserves the pinned 3.1.0 / 3.2.x behaviour.
+- **mariadb field-type name for BIGINT.** The typeCast branch uses `'BIGINT'` (mariadb's name), not `'LONGLONG'` (the mysql2 name). An in-code comment records this to prevent the same mistake on future connector upgrades.
+
+### Housekeeping
+
+- `src/worker/utils/events.ts` — `sendResponse` is conditionally instrumented with `channel:worker.postResponse` (zero cost when `OXMYSQL_PERF_TRACE` is unset).
+- `src/worker/worker.ts` — handler span recorded as `channel:worker.handler`; three diagnostic actions (`noop`, `perfSnapshot`, `perfReset`) added for bench use. They are not exposed through any FiveM export.
+- `docs/compat-matrix.md` — `[PHASE-4]` markers on §4.1 / §4.3 / §5 replaced with `[PINNED by tests/…]` references; new §4.1.1 and §5.1 tables document flag-off vs flag-on contracts side-by-side.
+- `MIGRATION.md` §1 / §2 — now point at the opt-in fixes instead of describing them as roadmap items.
+
+### Pinned defects (still deliberate under defaults)
+
+With the BIGINT and DATE opt-ins landed, the only remaining pinned defects under defaults are the BIT trio covered by `mysql_bit_full_integer` (3.2.0+). Every pinned defect in the 3.1.0 / 3.2.0 entries either shipped a fix or has an active opt-in.
+
+### Migration
+
+No manual migration required. All four convars (`mysql_start_transaction_propagate_errors`, `mysql_bit_full_integer`, `mysql_bigint_as_string`, `mysql_date_as_utc`) default to the historical behaviour. Operators who want the correctness fixes should review [MIGRATION.md](MIGRATION.md) §1 and §2 — both carry the exact convar snippets and flip-time semantics. Operators who want perf telemetry should review [docs/performance-tuning.md](docs/performance-tuning.md) and set `OXMYSQL_PERF_TRACE=1` in the environment.
+
+---
+
 ## [3.2.1] — 2026-04-22
 
 Post-3.2.0 review pass + release-workflow hardening. Zero consumer-facing behaviour changes; every line in this release is either documentation, robustness, or CI infrastructure.
