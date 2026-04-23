@@ -58,3 +58,16 @@ describe('cluster 18 — graceful shutdown (§5.4)', () => {
     );
   });
 });
+
+// Deferred: a runtime complement to the source-level checks above that
+// exercises handleIncoming's shutdown case with pool.end + process.exit
+// stubbed. Initial attempt found that vi.spyOn on the mariadb Pool
+// instance does not get hit by the `await pool?.end()` call inside
+// worker.ts's dispatch — vitest's module-graph binding semantics
+// interact with pool.ts's `export let pool` in a way the spy does not
+// intercept. Source-level assertions in the describe block above still
+// pin the no-fallthrough + pool.end + process.exit(0) contract, so the
+// regression surface is covered; runtime reproduction is a future
+// improvement requiring a deeper module-graph workaround (e.g. vi.doMock
+// of the pool module at import time, plus handleIncoming re-imported
+// through the same factory).
