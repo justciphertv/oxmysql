@@ -5,6 +5,7 @@ import { parseTransaction } from '../utils/parseTransaction';
 import { performance } from 'perf_hooks';
 import { profileBatchStatements, runProfiler } from '../profiler';
 import { triggerFivemEvent } from '../utils/events';
+import * as perf from '../utils/perf';
 
 /** Maximum rows per COM_STMT_BULK_EXECUTE call — avoids connector-level failures with very large packets. */
 const BATCH_CHUNK_SIZE = 1000;
@@ -47,7 +48,10 @@ export const rawTransaction = async (
     return { error: logError(invokingResource, err) };
   }
 
+  const totalStart = perf.now();
+  const acquireStart = perf.now();
   using connection = await getConnection();
+  perf.mark('rawTransaction:getConnection', acquireStart);
 
   if (!connection) return { error: `${invokingResource} was unable to acquire a database connection.` };
 
@@ -55,7 +59,7 @@ export const rawTransaction = async (
 
   try {
     const hasProfiler = await runProfiler(connection, invokingResource);
-    await connection.beginTransaction();
+    await perf.time('rawTransaction:beginTransaction', () => connection.beginTransaction());
 
     if (!hasProfiler) {
       // Fast path: group consecutive same-SQL entries and use batch() for DML groups
@@ -68,12 +72,16 @@ export const rawTransaction = async (
           for (let offset = 0; offset < group.paramSets.length; offset += BATCH_CHUNK_SIZE) {
             const chunk = group.paramSets.slice(offset, offset + BATCH_CHUNK_SIZE);
             try {
-              await connection.batch(group.query, chunk);
+              await perf.time('rawTransaction:batch(DML-chunk)', () =>
+                connection.batch(group.query, chunk)
+              );
             } catch {
               // COM_STMT_BULK_EXECUTE failed (e.g. protocol/connectivity error).
               // Fall back to individual text-protocol queries so the transaction can still succeed.
               for (const params of chunk) {
-                await connection.query(group.query, params);
+                await perf.time('rawTransaction:query(DML-fallback)', () =>
+                  connection.query(group.query, params)
+                );
               }
             }
           }
@@ -81,7 +89,9 @@ export const rawTransaction = async (
         } else {
           for (const params of group.paramSets) {
             const t = performance.now();
-            await connection.query(group.query, params);
+            await perf.time('rawTransaction:query(ungrouped)', () =>
+              connection.query(group.query, params)
+            );
             logQuery(invokingResource, group.query, performance.now() - t, params);
           }
         }
@@ -100,7 +110,8 @@ export const rawTransaction = async (
       }
     }
 
-    await connection.commit();
+    await perf.time('rawTransaction:commit', () => connection.commit());
+    perf.mark('rawTransaction:total', totalStart);
 
     response = true;
   } catch (err: any) {

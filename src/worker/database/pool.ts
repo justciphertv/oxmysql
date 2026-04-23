@@ -58,7 +58,7 @@ export async function createConnectionPool(options: PoolConfig) {
       `^7[oxmysql-mariadb-patch ${BUILD_STAMP}] pool options applied: ` +
         `jsonStrings=true autoJsonMap=false bigIntAsNumber=true insertIdAsNumber=true^0`,
     );
-    parentPort!.postMessage({ action: 'dbVersion', data: dbVersion });
+    parentPort?.postMessage({ action: 'dbVersion', data: dbVersion });
 
     if (options.multipleStatements) {
       print(`multipleStatements is enabled. Used incorrectly, this option may cause SQL injection.`);

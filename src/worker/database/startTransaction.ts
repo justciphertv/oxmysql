@@ -2,6 +2,7 @@ import { MySql, activeConnections, getConnection } from './connection';
 import { logError } from '../logger';
 import type { CFXParameters } from '../../types';
 import { parseArguments } from '../utils/parseArguments';
+import * as perf from '../utils/perf';
 
 async function runQuery(conn: MySql | null, sql: string, values: CFXParameters) {
   [sql, values] = parseArguments(sql, values);
@@ -18,9 +19,13 @@ async function runQuery(conn: MySql | null, sql: string, values: CFXParameters) 
 export const beginTransaction = async (
   invokingResource: string
 ): Promise<{ connectionId: number } | { error: string }> => {
+  const totalStart = perf.now();
   try {
+    const acquireStart = perf.now();
     const conn = await getConnection();
-    await conn.beginTransaction();
+    perf.mark('startTransaction:beginTransaction:getConnection', acquireStart);
+    await perf.time('startTransaction:beginTransaction:BEGIN', () => conn.beginTransaction());
+    perf.mark('startTransaction:beginTransaction:total', totalStart);
     return { connectionId: conn.id };
   } catch (err: any) {
     return { error: logError(invokingResource, err) };
@@ -33,6 +38,7 @@ export const runTransactionQuery = async (
   sql: string,
   values: CFXParameters
 ): Promise<{ result: any } | { error: string }> => {
+  const totalStart = perf.now();
   const conn = activeConnections[connectionId] ?? null;
 
   // Audit M1 race guard: once endTransaction has begun tearing the
@@ -50,7 +56,10 @@ export const runTransactionQuery = async (
   }
 
   try {
-    const result = await runQuery(conn, sql, values);
+    const result = await perf.time('startTransaction:runTransactionQuery:execute', () =>
+      runQuery(conn, sql, values)
+    );
+    perf.mark('startTransaction:runTransactionQuery:total', totalStart);
     return { result };
   } catch (err: any) {
     return { error: err.message };
@@ -65,12 +74,13 @@ export const endTransaction = async (
 
   if (!conn) return { result: true };
 
+  const totalStart = perf.now();
   // Mark the wrapper closed so any concurrent runTransactionQuery refuses
   // to start new work, then wait for any op already in flight to complete
   // before committing / rolling back. Together these prevent the M1 race.
   conn.closed = true;
   try {
-    await conn.waitUntilIdle();
+    await perf.time('startTransaction:endTransaction:waitUntilIdle', () => conn.waitUntilIdle());
   } catch {
     /* waitUntilIdle never throws, but defensive */
   }
@@ -79,9 +89,9 @@ export const endTransaction = async (
 
   try {
     if (commit) {
-      await conn.commit();
+      await perf.time('startTransaction:endTransaction:commit', () => conn.commit());
     } else {
-      await conn.rollback();
+      await perf.time('startTransaction:endTransaction:rollback', () => conn.rollback());
     }
   } catch (err: any) {
     endError = err instanceof Error ? err : new Error(String(err));
@@ -105,6 +115,8 @@ export const endTransaction = async (
       }
     }
   }
+
+  perf.mark('startTransaction:endTransaction:total', totalStart);
 
   if (endError) {
     return {

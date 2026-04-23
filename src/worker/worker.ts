@@ -45,7 +45,7 @@ export async function handleIncoming(message: {
   }
 }
 
-parentPort!.on('message', handleIncoming);
+parentPort?.on('message', handleIncoming);
 
 // Tracks whether a prior `initialize` is still in its retry loop. A
 // second initialize that arrives while the first is mid-connect must be

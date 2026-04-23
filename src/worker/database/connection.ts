@@ -3,6 +3,7 @@ import { scheduleTick } from '../utils/events';
 import { sleep } from '../utils/sleep';
 import { pool } from './pool';
 import type { CFXParameters } from '../../types';
+import * as perf from '../utils/perf';
 
 (Symbol as any).dispose ??= Symbol('Symbol.dispose');
 
@@ -121,7 +122,14 @@ export class MySql {
 }
 
 export async function getConnection(connectionId?: number) {
+  const waitStart = perf.now();
   while (!pool) await sleep(0);
+  perf.mark('getConnection:poolReady', waitStart);
 
-  return connectionId ? activeConnections[connectionId] : new MySql(await pool!.getConnection());
+  if (connectionId) return activeConnections[connectionId];
+
+  const acquireStart = perf.now();
+  const conn = new MySql(await pool!.getConnection());
+  perf.mark('getConnection:pool.getConnection', acquireStart);
+  return conn;
 }

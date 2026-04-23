@@ -35,24 +35,29 @@ describe('cluster 13 — pool-readiness race guard (§10.3)', () => {
     expect(poolSrc).toMatch(/export async function awaitPool\(\)/);
   });
 
-  // Match only actual call-site dereferences (`await pool!.query` /
-  // `await pool!.batch`), not comment text that happens to contain the
-  // characters `pool!`.
-  const realDerefRe = /await pool!\.(query|batch)/;
+  // Match any call-site dereference of the form `pool!.query(` or
+  // `pool!.batch(`. Accepts both the bare `await pool!.query(...)` form
+  // and the perf-wrapped form `() => pool!.query(...)`. Does not match
+  // the prose `pool!` strings in comments because it requires the `.`
+  // and opening paren of the call.
+  const realDerefRe = /pool!\.(query|batch)\(/;
+  // Accept the bare `awaitPool()` call OR the perf-instrumented form
+  // `perf.time('...', () => awaitPool())` — both dispatch the same gate.
+  const awaitPoolRe = /awaitPool\(\)/;
 
   it('rawQuery awaits pool before any pool! call-site', () => {
-    const awaitIdx = rawQuerySrc.indexOf('await awaitPool()');
+    const awaitMatch = rawQuerySrc.match(awaitPoolRe);
     const derefMatch = rawQuerySrc.match(realDerefRe);
-    expect(awaitIdx).toBeGreaterThan(-1);
+    expect(awaitMatch).not.toBeNull();
     expect(derefMatch).not.toBeNull();
-    expect(awaitIdx).toBeLessThan(derefMatch!.index!);
+    expect(awaitMatch!.index!).toBeLessThan(derefMatch!.index!);
   });
 
   it('rawExecute awaits pool before any pool! call-site', () => {
-    const awaitIdx = rawExecuteSrc.indexOf('await awaitPool()');
+    const awaitMatch = rawExecuteSrc.match(awaitPoolRe);
     const derefMatch = rawExecuteSrc.match(realDerefRe);
-    expect(awaitIdx).toBeGreaterThan(-1);
+    expect(awaitMatch).not.toBeNull();
     expect(derefMatch).not.toBeNull();
-    expect(awaitIdx).toBeLessThan(derefMatch!.index!);
+    expect(awaitMatch!.index!).toBeLessThan(derefMatch!.index!);
   });
 });
