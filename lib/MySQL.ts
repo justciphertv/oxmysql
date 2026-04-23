@@ -106,7 +106,7 @@ function execute(method: string, query: Query | Transaction, params?: Params) {
 
 export const oxmysql: OxMySQL = {
   store(query) {
-    assert(typeof query !== 'string', `Query expects a string, received ${typeof query}`);
+    assert(typeof query === 'string', `Query expects a string, received ${typeof query}`);
 
     return QueryStore.push(query);
   },
