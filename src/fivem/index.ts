@@ -362,13 +362,18 @@ onNet(
   }) => {
     if (typeof data.resource !== 'string' || !IsPlayerAceAllowed(source as unknown as string, 'command.mysql')) return;
 
+    // Guard before the filter: a missing resource + non-empty search
+    // previously threw TypeError on `undefined.filter(...)`. Short-
+    // circuit to the same no-op the downstream `if (!resourceLog)`
+    // already performed for the empty-search branch.
+    const bucket = logStorage[data.resource];
+    if (!bucket) return;
+
     if (data.search) data.search = data.search.toLowerCase();
 
     const resourceLog = data.search
-      ? logStorage[data.resource].filter((q) => q.query.toLowerCase().includes(data.search))
-      : logStorage[data.resource];
-
-    if (!resourceLog) return;
+      ? bucket.filter((q) => q.query.toLowerCase().includes(data.search))
+      : bucket;
 
     const sort = data.sortBy && data.sortBy.length > 0 ? data.sortBy[0] : false;
     const startRow = data.pageIndex * 10;
