@@ -33,6 +33,14 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # Defensive: GitHub-hosted runners are fresh VMs, but we have seen
+      # transient "0.0.0.0:33060: address already in use" failures on
+      # shared infrastructure. Tearing down first (idempotent; succeeds
+      # when nothing exists) clears any stale container/port binding
+      # from a prior job that shared the same ephemeral host.
+      - name: Reap stale MariaDB container (idempotent)
+        run: docker compose -f tests/compose.yml down -v --remove-orphans || true
+
       - name: Start MariaDB fixture
         run: docker compose -f tests/compose.yml up -d --wait
 
@@ -81,6 +89,14 @@ jobs:
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
+
+      # Defensive: GitHub-hosted runners are fresh VMs, but we have seen
+      # transient "0.0.0.0:33060: address already in use" failures on
+      # shared infrastructure. Tearing down first (idempotent; succeeds
+      # when nothing exists) clears any stale container/port binding
+      # from a prior job that shared the same ephemeral host.
+      - name: Reap stale MariaDB container (idempotent)
+        run: docker compose -f tests/compose.yml down -v --remove-orphans || true
 
       - name: Start MariaDB fixture
         run: docker compose -f tests/compose.yml up -d --wait
