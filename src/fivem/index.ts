@@ -274,25 +274,58 @@ RegisterCommand(
   (source: number, args: string[]) => {
     if (source !== 0) return console.log('^3This command can only be run server side^0');
 
+    // An operator who sets `mysql_debug` to a non-array JSON value
+    // (e.g. `set mysql_debug "true"`) would previously crash this
+    // command at JSON.parse + arr.push. Decode defensively, accepting
+    // either 'false' or a JSON-encoded string[], and fall back to an
+    // empty list on any parse error.
+    let arr: string[] = [];
     const current = GetConvar('mysql_debug', 'false');
-    let arr: string[] = current === 'false' ? [] : JSON.parse(current);
+    if (current !== 'false') {
+      try {
+        const parsed = JSON.parse(current);
+        if (Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')) {
+          arr = parsed as string[];
+        } else {
+          console.log(
+            `^3mysql_debug is not a JSON array of resource names (was ${current}); treating as empty^0`,
+          );
+        }
+      } catch {
+        console.log(
+          `^3mysql_debug could not be parsed as JSON (was ${current}); treating as empty^0`,
+        );
+      }
+    }
 
     switch (args[0]) {
-      case 'add':
-        arr.push(args[1]);
+      case 'add': {
+        const name = args[1];
+        if (typeof name !== 'string' || name.length === 0) {
+          return console.log(`^3Usage: oxmysql_debug add <resource>^0`);
+        }
+        if (arr.includes(name)) {
+          return console.log(`^3${name} is already in mysql_debug^0`);
+        }
+        arr.push(name);
         SetConvar('mysql_debug', JSON.stringify(arr));
-        return console.log(`^3Added ${args[1]} to mysql_debug^0`);
+        return console.log(`^3Added ${name} to mysql_debug^0`);
+      }
 
       case 'remove': {
-        const idx = arr.indexOf(args[1]);
-        if (idx === -1) return;
+        const name = args[1];
+        if (typeof name !== 'string' || name.length === 0) {
+          return console.log(`^3Usage: oxmysql_debug remove <resource>^0`);
+        }
+        const idx = arr.indexOf(name);
+        if (idx === -1) return console.log(`^3${name} is not in mysql_debug^0`);
         arr.splice(idx, 1);
         SetConvar('mysql_debug', arr.length === 0 ? 'false' : JSON.stringify(arr));
-        return console.log(`^3Removed ${args[1]} from mysql_debug^0`);
+        return console.log(`^3Removed ${name} from mysql_debug^0`);
       }
 
       default:
-        return console.log(`^3Usage: oxmysql add|remove <resource>^0`);
+        return console.log(`^3Usage: oxmysql_debug add|remove <resource>^0`);
     }
   },
   true
