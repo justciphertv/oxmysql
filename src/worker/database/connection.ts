@@ -94,15 +94,28 @@ export class MySql {
   }
 
   [Symbol.dispose]() {
-    if (this.transaction && !this.failed) this.commit();
-
     delete activeConnections[this.id];
-    // Destroy tainted connections instead of returning them to the pool.
-    // This prevents a dead/corrupted connection from being reused by subsequent queries.
-    if (this.failed) {
-      this.connection.destroy();
-    } else {
-      this.connection.release();
+
+    // A transaction flag still set at dispose time means the block
+    // exited without either commit() or rollback() clearing it — that
+    // is a programmer error, not a normal flow. All current callers
+    // (rawTransaction + startTransaction) commit / rollback explicitly
+    // along every code path, so this branch is unreachable in practice.
+    // If it ever does fire, the underlying connection's transaction
+    // state is indeterminate: a fire-and-forget commit() would be
+    // synchronously followed by release() and could race the commit
+    // against the next borrower of the connection; and committing a
+    // partially-applied transaction is the opposite of safe. Treat any
+    // such connection as tainted — destroy instead of releasing — so
+    // the pool does not hand out a connection with an unresolved
+    // transaction.
+    const tainted = this.failed || Boolean(this.transaction);
+
+    try {
+      if (tainted) this.connection.destroy();
+      else this.connection.release();
+    } catch {
+      /* underlying socket may already be torn down */
     }
   }
 }
