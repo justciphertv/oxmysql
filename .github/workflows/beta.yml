@@ -75,15 +75,20 @@ jobs:
           cd ./temp && zip -r ../oxmysql.zip ./oxmysql
 
       - name: Create beta release
-        uses: 'marvinpinto/action-automatic-releases@v1.2.1'
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           # Always marked as prerelease — a beta / rc / alpha tag should
           # not appear as the "latest" release on the repo landing page.
           prerelease: true
-          automatic_release_tag: ${{ github.ref_name }}
-          title: ${{ github.ref_name }}
+          # Explicitly prevent the action's default "make latest"
+          # behaviour on the chance a beta is published after a stable.
+          # Only stable releases should own the "latest" symlink.
+          make_latest: 'false'
           files: oxmysql.zip
+          fail_on_unmatched_files: true
 
       # Intentionally omitted vs. the stable workflow:
       # - No "Push version bump" commit back to the default branch. A beta
