@@ -1,6 +1,6 @@
 {
   "name": "oxmysql",
-  "version": "3.3.0",
+  "version": "3.3.1",
   "description": "FXServer to MariaDB communication via the mariadb connector, running in a worker thread.",
   "repository": {
     "type": "git",

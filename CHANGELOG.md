@@ -2,6 +2,21 @@
 
 All notable changes to this fork. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers are semver; minor bumps imply additive changes, patch bumps imply bug fixes, and major bumps would imply a break in the public Lua / FiveM export surface (none so far — the fork is strictly backward-compatible with upstream).
 
+## [3.3.1] — 2026-04-23
+
+Two bug fixes carried on top of the 3.3.0 landing. No new convars, no instrumentation changes, no public-surface changes. Default-off flags from 3.3.0 are unaffected.
+
+### Fixed
+
+- **`MySQL.store()` assert was inverted** ([lib/MySQL.ts](lib/MySQL.ts)). The pre-fix guard read `assert(typeof query !== 'string', …)`, which threw `TypeError` on every valid string argument — `MySQL.store("SELECT …")` has been unreachable since introduction. The check now correctly throws only on non-string inputs. Effectively silent in practice because no in-tree consumer calls `MySQL.store()` and it is outside the vitest worker-side scope, but any external caller relying on it would have been hitting the TypeError on every invocation.
+- **`mysql_logger_service` loading swallowed every failure silently** ([src/fivem/index.ts](src/fivem/index.ts)). The previous `&& new Function(...)() || (() => {})` chain collapsed three distinct failure modes (missing resource file, syntax / top-level throw, non-function export) into a silent fallback to a no-op logger, so a misconfigured convar looked exactly like "no logger configured". Replaced with an IIFE that handles each failure mode explicitly and emits a yellow console warning naming the logger service and the cause. Behaviour is unchanged when the logger loads successfully; only misconfiguration is now visible.
+
+### Housekeeping
+
+- No consumer-facing surface changed. No CI changes. No test changes (the fixes are in areas the vitest suite does not cover; both are guards on operator-configured input paths).
+
+---
+
 ## [3.3.0] — 2026-04-23
 
 Landing release for the four post-3.2.1 improvement phases: hot-path instrumentation, pool/transaction contention characterisation, parent↔worker channel measurement, and two opt-in correctness flags for the long-standing BIGINT / DATE defects. Every behavioural change is either zero-cost-when-off instrumentation or a convar-gated opt-in; pre-existing 3.2.x deployments see byte-for-byte identical behaviour on upgrade.
