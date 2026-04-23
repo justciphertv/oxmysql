@@ -2,6 +2,33 @@
 
 All notable changes to this fork. Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Version numbers are semver; minor bumps imply additive changes, patch bumps imply bug fixes, and major bumps would imply a break in the public Lua / FiveM export surface (none so far — the fork is strictly backward-compatible with upstream).
 
+## [3.2.1] — 2026-04-22
+
+Post-3.2.0 review pass + release-workflow hardening. Zero consumer-facing behaviour changes; every line in this release is either documentation, robustness, or CI infrastructure.
+
+### Fixed
+
+- **`Symbol.dispose` on `MySql` no longer fire-and-forgets `commit()`.** The sync dispose hook previously started a `commit()` promise and then called `release()` immediately, which could race the commit against the next pool borrower and — separately — was unsafe semantics for an unexpected-exit path (committing a partial transaction of unknown state). Dispose now treats any still-open transaction at dispose time as tainted and destroys the connection instead of releasing it. Unreachable under current rawTransaction / startTransaction flows; the safety net now has correct semantics.
+- **`oxmysql:fetchResource` NUI handler no longer throws on a missing resource name + non-empty search term.** Hoisted the `logStorage[data.resource]` lookup ahead of the filter branch; a missing bucket short-circuits cleanly instead of calling `.filter()` on `undefined`. Ace-gated handler; the previous symptom was one console error per bad request.
+- **`oxmysql_debug` command robust against a malformed `mysql_debug` convar.** Operators who had previously run `set mysql_debug "true"` (or any non-array JSON) would crash `oxmysql_debug add` at `arr.push`. The command now decodes the convar inside a try/catch with an `string[]` shape check, falls back to an empty list with a visible diagnostic on parse or shape failure, and validates the `<resource>` argument on both `add` and `remove`.
+
+### Changed
+
+- **Release workflow migrated off the deprecated `marvinpinto/action-automatic-releases@v1.2.1`** to `softprops/action-gh-release@v2`. Node 20 is scheduled for removal from GitHub Actions runners mid-2026; the replacement runs on Node 24. `fail_on_unmatched_files: true` added so a missing `oxmysql.zip` surfaces as a failed workflow run rather than an empty release.
+- **`pre-release.yml` retired.** The manual-dispatch workflow still carried the default-branch-checkout + commit-back + tag-move recipe that corrupted `main` when the `v3.2.0` tag was first pushed. `beta.yml` now covers every prerelease path with the hardened post-incident recipe, triggered automatically on `v*.*.*-*` tag pushes.
+- **README refresh** for the `3.2.0` surface area: current-version status line, expanded convar table (`mysql_start_transaction_propagate_errors`, `mysql_bit_full_integer`), the banner's second pool-options line, a new Events section with Lua handler snippets for `oxmysql:error` / `oxmysql:ready`, a Branches section mapping `main` / `mariadb-patch` / `beta` to their roles, and a link to `SECURITY.md`.
+- **`IsPlayerAceAllowed` call in the NUI handler uses `String(source)`** instead of a `source as unknown as string` double-cast. Typed-bridge cleanup only; no runtime behaviour change.
+
+### Housekeeping
+
+- `tests/18-graceful-shutdown.test.ts` — runtime complement to the source-level shutdown checks was attempted but deferred; vitest module-graph semantics around pool.ts's `export let pool` live binding prevent `vi.spyOn` from intercepting the `await pool?.end()` call inside the worker. The source-level tests still pin the ordering contract. Rationale captured in-file for a future pass.
+
+### Workflow / security notes
+
+- The `v3.2.0` tag on origin now points at commit `f56c049`, which is where the first release was meant to be before the destructive upstream-inherited workflow rewrote it. `main` was reset back to the pre-fork baseline (`32b41b0`) as part of the cleanup; it remains untouched by the fork's release line.
+
+---
+
 ## [3.2.0] — 2026-04-21
 
 This release closes every High- and Medium-severity audit item opened in Phase 1 that was deferred out of 3.1.0, plus every Phase-6 post-audit finding. All consumer-facing behaviour changes land either unconditionally as correctness fixes (no consumer was getting the right answer before) or behind a convar flag defaulting to `false` (the 3.1.0 pinned behaviour is preserved on upgrade). No public Lua / FiveM export signatures, return shapes, or alias maps have narrowed; every pre-3.2.0 consumer continues to work unchanged.
