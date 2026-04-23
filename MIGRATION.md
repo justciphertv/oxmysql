@@ -45,15 +45,15 @@ The fork deliberately diverges in a handful of places. None break the public exp
 
 ### 1. BIGINT / insertId precision
 
-Pool options are fixed at `bigIntAsNumber: true` and `insertIdAsNumber: true` (same as upstream). Values above `Number.MAX_SAFE_INTEGER` (`2^53 − 1` = `9007199254740991`) lose precision silently. In practice this bites anyone using `UNSIGNED BIGINT AUTO_INCREMENT` tables seeded past 2^53, or `UNSIGNED BIGINT` columns storing large external IDs.
+Default pool options are `bigIntAsNumber: true` and `insertIdAsNumber: true` (same as upstream). Values above `Number.MAX_SAFE_INTEGER` (`2^53 − 1` = `9007199254740991`) lose precision silently. In practice this bites anyone using `UNSIGNED BIGINT AUTO_INCREMENT` tables seeded past 2^53, or `UNSIGNED BIGINT` columns storing large external IDs.
 
-**What you should do:** if any of your `AUTO_INCREMENT` columns could reasonably exceed 2^53 in this table's lifetime, or if you store external identifiers that large, test your flows now. A `bigint`/`string` opt-in mode is on the roadmap but not in 3.1.0.
+**What you should do:** if any of your `AUTO_INCREMENT` columns could reasonably exceed 2^53 in this table's lifetime, or if you store external identifiers that large, set the opt-in convar [`mysql_bigint_as_string`](#new-optional-features) (3.x+). Values outside the safe range come through as decimal strings; values inside stay as `number`, so existing code that handles typical rows keeps working.
 
 ### 2. DATE columns parse in the process-local timezone
 
-The `typeCast` for `DATE` calls `new Date(value + ' 00:00:00').getTime()` — which parses in the Node process's local timezone. On a DST-observing system this produces a 23h or 25h delta between adjacent dates straddling spring-forward / fall-back. `DATETIME` / `TIMESTAMP` are stored with the full HH:mm:ss and are not affected.
+By default the `typeCast` for `DATE` calls `new Date(value + ' 00:00:00').getTime()` — which parses in the Node process's local timezone. On a DST-observing system this produces a 23h or 25h delta between adjacent dates straddling spring-forward / fall-back. `DATETIME` / `TIMESTAMP` are stored with the full HH:mm:ss and are not affected.
 
-**What you should do:** run FXServer with `TZ=UTC` in the environment (or equivalent on your host OS) if you care about DST-safe DATE arithmetic. This matches what most production deployments do anyway.
+**What you should do:** either run FXServer with `TZ=UTC` in the environment, or set the opt-in convar [`mysql_date_as_utc`](#new-optional-features) (3.x+). With the convar on, `DATE` parses as midnight UTC regardless of the host timezone — DST-immune and deployment-independent. The convar only affects `DATE`; `DATETIME` / `TIMESTAMP` handling is untouched.
 
 ### 3. JSON columns return as strings
 
@@ -90,6 +90,28 @@ Default `30000`. Controls how long the worker waits between failed connection at
 
 ```cfg
 set mysql_init_retry_ms 5000
+```
+
+### `mysql_bigint_as_string` — lossless BIGINT / insertId (3.x+)
+
+Default `false` (preserves the historical lossy `Number` coercion — values above `2^53 - 1` silently truncate). When `true`:
+
+- The pool runs with `bigIntAsNumber: false` and `insertIdAsNumber: false`.
+- `BIGINT` column values in the safe range stay as `number`; values outside come through as decimal **strings** (e.g. `"9007199254740993"`) — no precision loss.
+- `insertId` follows the same rule.
+
+Takes effect at worker init — restart the resource after flipping it. Covers both signed and unsigned `BIGINT`. See [compat-matrix §4.1 / §4.3](docs/compat-matrix.md).
+
+```cfg
+set mysql_bigint_as_string true
+```
+
+### `mysql_date_as_utc` — DST-immune DATE parsing (3.x+)
+
+Default `false` (preserves the historical local-timezone parse — DST transitions produce 23h/25h deltas). When `true`, `DATE` columns parse as midnight UTC regardless of the FXServer host timezone: the delta between any two adjacent dates is exactly 24h. Only affects `DATE`; `DATETIME` / `TIMESTAMP` are untouched.
+
+```cfg
+set mysql_date_as_utc true
 ```
 
 ## Events to listen for

@@ -44,6 +44,8 @@ The FXServer `convar_category 'OxMySQL'` lists every user-facing convar. Non-def
 | `mysql_init_retry_ms` | `30000` | **Fork-only.** Connection-retry interval during initial handshake. Clamped worker-side to `>= 1000`. |
 | `mysql_start_transaction_propagate_errors` | `false` | **Fork-only (3.2.0+).** When `true`, `MySQL.startTransaction` throws on commit / rollback failures instead of silently returning `true`. Affects `startTransaction` / `endTransaction` only; `MySQL.transaction` is unchanged. See [compat-matrix §2.9.1](docs/compat-matrix.md). |
 | `mysql_bit_full_integer` | `false` | **Fork-only (3.2.0+).** When `true`, `BIT(n > 1)` decodes as the full big-endian integer (prefers `number`, falls back to `bigint`) and `BIT(1) NULL` returns `null` instead of `false`. See [compat-matrix §4.4](docs/compat-matrix.md). |
+| `mysql_bigint_as_string` | `false` | **Fork-only (3.x+).** When `true`, `BIGINT` values and `insertId` outside `Number.MAX_SAFE_INTEGER` (`2^53 - 1`) are returned as decimal strings; safe-range values stay as `number`. Flips the pool's `bigIntAsNumber` / `insertIdAsNumber` — takes effect on resource restart. See [compat-matrix §4.1 / §4.3](docs/compat-matrix.md). |
+| `mysql_date_as_utc` | `false` | **Fork-only (3.x+).** When `true`, `DATE` columns parse as midnight UTC instead of midnight in the process-local timezone, giving DST-immune 24-hour deltas. `DATETIME` / `TIMESTAMP` are untouched. See [compat-matrix §5](docs/compat-matrix.md). |
 
 ## Events
 

@@ -1,5 +1,12 @@
 import { parentPort } from 'worker_threads';
-import { updateConfig, setIsolationLevel, initNamedPlaceholders, setBitFullInteger } from './config';
+import {
+  updateConfig,
+  setIsolationLevel,
+  initNamedPlaceholders,
+  setBitFullInteger,
+  setBigintAsString,
+  setDateAsUtc,
+} from './config';
 import { createConnectionPool, pool } from './database/pool';
 import { rawQuery } from './database/rawQuery';
 import { rawExecute } from './database/rawExecute';
@@ -70,6 +77,8 @@ async function dispatch(action: string, id: number | undefined, data: any) {
         mysql_debug,
         namedPlaceholders,
         mysql_bit_full_integer,
+        mysql_bigint_as_string,
+        mysql_date_as_utc,
       } = data;
 
       if (initializing) {
@@ -107,6 +116,10 @@ async function dispatch(action: string, id: number | undefined, data: any) {
         process.exit(1);
       }
       setBitFullInteger(mysql_bit_full_integer === true);
+      // Must be set before createConnectionPool below — the BIGINT flag
+      // flips `bigIntAsNumber` / `insertIdAsNumber` in pool options.
+      setBigintAsString(mysql_bigint_as_string === true);
+      setDateAsUtc(mysql_date_as_utc === true);
 
       updateConfig({
         mysql_debug,

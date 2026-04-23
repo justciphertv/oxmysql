@@ -14,6 +14,29 @@ export let convertNamedPlaceholders:
 // the pinned behaviour on upgrade. See compat-matrix §4.4.
 export let mysql_bit_full_integer = false;
 
+// When true, BIGINT columns and `insertId` values whose magnitude
+// exceeds `Number.MAX_SAFE_INTEGER` (2^53 - 1) are returned as a
+// decimal string instead of a precision-losing number. Values within
+// the safe range continue to return as `number` for backwards
+// compatibility. Opt-in via the convar `mysql_bigint_as_string`
+// (default false, preserving the 3.1.0 / 3.2.0 pinned lossy behaviour).
+// See compat-matrix §4.1 / §4.3.
+//
+// This flag affects the mariadb pool configuration (`bigIntAsNumber`,
+// `insertIdAsNumber`) and therefore only takes effect when the worker
+// rebuilds its pool — i.e. on resource (re)start. Changing it with
+// `set mysql_bigint_as_string true` at runtime does NOT switch mode
+// for an already-running pool; restart the resource.
+export let mysql_bigint_as_string = false;
+
+// When true, typeCast parses DATE columns as midnight UTC rather than
+// midnight in the Node process's local timezone, making DATE arithmetic
+// DST-immune and deployment-independent. Opt-in via
+// `mysql_date_as_utc` (default false, preserving the historical local-
+// timezone behaviour). See compat-matrix §5. Takes effect on next
+// typeCast invocation — no pool rebuild needed.
+export let mysql_date_as_utc = false;
+
 // Cached OR of `process.env.OXMYSQL_DIAG === '1'` (evaluated at module
 // load) and `!!mysql_debug` (recomputed in updateConfig). typeCast reads
 // this on every column decode — having it as a precomputed boolean keeps
@@ -45,6 +68,14 @@ export function setIsolationLevel(level: string) {
 
 export function setBitFullInteger(enabled: boolean) {
   mysql_bit_full_integer = Boolean(enabled);
+}
+
+export function setBigintAsString(enabled: boolean) {
+  mysql_bigint_as_string = Boolean(enabled);
+}
+
+export function setDateAsUtc(enabled: boolean) {
+  mysql_date_as_utc = Boolean(enabled);
 }
 
 export interface NamedPlaceholdersCheck {

@@ -3,6 +3,17 @@ import { parentPort } from 'worker_threads';
 import * as workerConfig from '../config';
 import { mysql_bit_full_integer } from '../config';
 
+const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+const MIN_SAFE_BIG = -MAX_SAFE_BIG;
+
+/** Convert a bigint to either `number` (when it fits safely in IEEE-754
+ *  double) or its lexical decimal string. Used by the BIGINT / insertId
+ *  branches when `mysql_bigint_as_string` is on. Exported so
+ *  `parseResponse` can apply the same rule to `insertId`. */
+export function bigintToSafeNumberOrString(v: bigint): number | string {
+  return v >= MIN_SAFE_BIG && v <= MAX_SAFE_BIG ? Number(v) : v.toString();
+}
+
 /**
  * MariaDB/MySQL reserve collation id 63 for the `binary` collation. The
  * connector itself uses the same signal (`col.collation.index === 63`) to
@@ -102,7 +113,33 @@ export const typeCast: TypeCastFunction = (column: FieldInfo, next: TypeCastNext
     }
     case 'DATE': {
       const value = column.string();
-      return value ? new Date(value + ' 00:00:00').getTime() : null;
+      if (!value) return null;
+      // Flag on: parse as midnight UTC, DST-immune, deployment-independent.
+      // Flag off: keep the historical local-tz parse so 3.1.0/3.2.0
+      // consumers see identical byte-for-byte results on upgrade.
+      if (workerConfig.mysql_date_as_utc) {
+        return new Date(`${value}T00:00:00Z`).getTime();
+      }
+      return new Date(value + ' 00:00:00').getTime();
+    }
+    case 'BIGINT': {
+      // Flag-off: connector was configured with `bigIntAsNumber: true`,
+      // so `next()` already returns a `number` (with precision loss
+      // above 2^53 — the pinned historical behaviour). Flag-on:
+      // connector returns `bigint`; convert back to `number` when safe,
+      // otherwise return the lexical decimal string so callers see the
+      // exact stored value. See compat-matrix §4.1.
+      //
+      // Note: mariadb names the field type 'BIGINT'. The equivalent
+      // mysql2 name is 'LONGLONG' — do not conflate; oxmysql uses
+      // mariadb's connector exclusively.
+      if (!workerConfig.mysql_bigint_as_string) return next();
+      const raw = next();
+      if (raw === null || raw === undefined) return raw as TypeCastResult;
+      if (typeof raw === 'bigint') return bigintToSafeNumberOrString(raw) as TypeCastResult;
+      // Defensive fall-through: if the connector has already returned a
+      // number (e.g. UNSIGNED flag handling), pass it through unchanged.
+      return raw as TypeCastResult;
     }
     case 'TINY':
       return column.columnLength === 1 ? column.string() === '1' : next();

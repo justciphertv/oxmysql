@@ -233,6 +233,24 @@ const mysql_start_transaction_propagate_errors =
 const mysql_bit_full_integer =
   GetConvar('mysql_bit_full_integer', 'false') === 'true';
 
+// Opt-in corrected BIGINT / insertId handling. Default preserves
+// historical lossy Number coercion above 2^53. When true, the worker
+// pool runs with `bigIntAsNumber: false`, the BIGINT typeCast branch
+// returns `string` for values outside MAX_SAFE_INTEGER range, and
+// parseResponse stringifies large `insertId` values. Takes effect at
+// worker init — restart the resource after flipping it.
+// See compat-matrix §4.1 / §4.3.
+const mysql_bigint_as_string =
+  GetConvar('mysql_bigint_as_string', 'false') === 'true';
+
+// Opt-in UTC DATE parsing. Default preserves the historical process-
+// local-timezone parse (which suffers 23h/25h deltas on DST days).
+// When true, DATE columns are parsed as `YYYY-MM-DDT00:00:00Z` → UTC
+// midnight, giving DST-immune arithmetic regardless of the FXServer
+// host's TZ setting. See compat-matrix §5.
+const mysql_date_as_utc =
+  GetConvar('mysql_date_as_utc', 'false') === 'true';
+
 const connectionOptions = buildConnectionOptions();
 
 // Extract and remove the sentinel before sending options to the mariadb pool.
@@ -245,6 +263,8 @@ worker.postMessage({
     mysql_transaction_isolation_level,
     mysql_init_retry_ms,
     mysql_bit_full_integer,
+    mysql_bigint_as_string,
+    mysql_date_as_utc,
     mysql_debug: false,
     namedPlaceholders: userNamedPlaceholders,
   },

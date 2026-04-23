@@ -12,8 +12,9 @@
 // To exercise the DST-visible path explicitly in CI, run the suite with
 // TZ=America/New_York.
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { getPool, initHarness, rawQuery } from './helpers/worker-harness';
+import { setDateAsUtc } from '../src/worker/config';
 
 function unwrap<T>(res: { result: T } | { error: string }): T {
   if ('error' in res) throw new Error(`rawQuery returned error: ${res.error}`);
@@ -133,5 +134,68 @@ describe('cluster 6 — dates', () => {
     );
     expect(typeof v).toBe('number');
     expect(v).toBe(2024);
+  });
+});
+
+// ── DATE with mysql_date_as_utc = true (compat-matrix §5, Phase 4) ──────
+// The flag flips DATE parsing from local-tz midnight to UTC midnight.
+// Since the pool config is unchanged (flag affects only typeCast logic),
+// this describe only needs to toggle the config boolean, not rebuild
+// the pool.
+
+const midnightUtcMs = (dateStr: string) => new Date(`${dateStr}T00:00:00Z`).getTime();
+
+describe('cluster 6 — DATE with mysql_date_as_utc flag enabled', () => {
+  beforeAll(async () => {
+    await initHarness();
+    setDateAsUtc(true);
+  });
+
+  afterAll(() => {
+    setDateAsUtc(false);
+  });
+
+  beforeEach(async () => {
+    await getPool().query('TRUNCATE t_dates');
+  });
+
+  it('DATE returns midnight UTC ms regardless of process timezone', async () => {
+    await getPool().query("INSERT INTO t_dates (d_date) VALUES ('2024-06-15')");
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT d_date FROM t_dates', []),
+    ) as number;
+    expect(typeof v).toBe('number');
+    expect(v).toBe(midnightUtcMs('2024-06-15'));
+  });
+
+  it('DATE across DST transition uses a flat 24h delta (DST-immune)', async () => {
+    await getPool().query("INSERT INTO t_dates (d_date) VALUES ('2024-03-10'), ('2024-03-11')");
+    const rows = unwrap(
+      await rawQuery(null, 'test', 'SELECT d_date FROM t_dates ORDER BY id', []),
+    ) as Array<{ d_date: number }>;
+    expect(rows[0].d_date).toBe(midnightUtcMs('2024-03-10'));
+    expect(rows[1].d_date).toBe(midnightUtcMs('2024-03-11'));
+    // The whole point of the flag: delta is always 24h, regardless of
+    // whether the process happens to be in a DST zone.
+    expect(rows[1].d_date - rows[0].d_date).toBe(24 * 3600 * 1000);
+  });
+
+  it('NULL DATE still reads as null (flag does not regress the null path)', async () => {
+    await getPool().query('INSERT INTO t_dates (d_date) VALUES (NULL)');
+    const v = unwrap(await rawQuery('scalar', 'test', 'SELECT d_date FROM t_dates', []));
+    expect(v).toBeNull();
+  });
+
+  it('DATETIME is unaffected by mysql_date_as_utc (only DATE is scoped)', async () => {
+    await getPool().query(
+      "INSERT INTO t_dates (d_datetime) VALUES ('2024-06-15 12:30:45')",
+    );
+    const v = unwrap(
+      await rawQuery('scalar', 'test', 'SELECT d_datetime FROM t_dates', []),
+    ) as number;
+    expect(typeof v).toBe('number');
+    // Same expectation as the flag-off DATETIME test — DATETIME parsing
+    // is untouched by the flag.
+    expect(v).toBe(new Date('2024-06-15 12:30:45').getTime());
   });
 });

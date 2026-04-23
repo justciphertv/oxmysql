@@ -235,9 +235,8 @@ When `parameters` is an object whose keys parse as integers (`{ '1': 'a', '2': '
 
 - `TINYINT(1)` → JavaScript `boolean` (true when stringified value is `'1'`; see `typeCast.ts:24`). **All other widths of TINYINT** defer to the connector default (`next()`), producing a `number`.
 - `SMALLINT`, `MEDIUMINT`, `INT` → JavaScript `number`.
-- `BIGINT` (any signedness) → JavaScript `number` (pool option `bigIntAsNumber: true`). Values above `Number.MAX_SAFE_INTEGER` lose precision silently.
-
-> **[PHASE-4]** Pin: insert `9007199254740993` (= 2^53 + 1) into a `BIGINT` column, read it back. Document the observed loss and add a test so any future switch to `bigint`/`string` is a deliberate break.
+- `BIGINT` (any signedness), **default (flag off)** → JavaScript `number` (pool option `bigIntAsNumber: true`). Values above `Number.MAX_SAFE_INTEGER` lose precision silently. Pinned by `tests/05-numeric.test.ts`.
+- `BIGINT`, **`mysql_bigint_as_string = true`** → `number` for values in `[-2^53+1, 2^53-1]`; decimal **string** otherwise (exact value preserved). Pinned by `tests/22-bigint-as-string.test.ts`. See §4.1.1 below.
 
 ### 4.2 `DECIMAL` / `NUMERIC`
 
@@ -246,9 +245,33 @@ When `parameters` is an object whose keys parse as integers (`{ '1': 'a', '2': '
 
 > **[PHASE-4]** Pin `DECIMAL` as a string. A regression test must select a `DECIMAL(20,4)` with enough precision to be unrepresentable as `number` and assert the result is a string.
 
+#### 4.1.1 `mysql_bigint_as_string` convar (3.x+)
+
+**Default:** `false` (preserves the pinned lossy `number` behaviour).
+**Scope:** affects the `BIGINT` typeCast branch **and** the `insertId` shaping in `parseResponse`. No other column type is touched.
+
+Setting the flag to `true`:
+
+- Flips the pool config to `bigIntAsNumber: false` and `insertIdAsNumber: false`. This change only happens when the pool is built — i.e. at worker init / resource start.
+- `BIGINT` values within `[-9007199254740991, 9007199254740991]` continue to return as `number` (same shape as flag off).
+- `BIGINT` values outside that range return as a **decimal string** — exact digits, no precision loss. Same rule applies to `insertId`.
+- `NULL` still returns `null`.
+
+| Shape | Flag off (default) | Flag on (corrected) |
+|-------|--------------------|---------------------|
+| `BIGINT` ≤ 2^53 - 1 | `number` | `number` — unchanged |
+| `BIGINT` = 2^53 + 1 | `number` `9007199254740992` (lossy) | `string` `"9007199254740993"` |
+| `BIGINT` = -(2^53 + 1) | `number` `-9007199254740992` (lossy) | `string` `"-9007199254740993"` |
+| `BIGINT NULL` | `null` | `null` — unchanged |
+| `insertId` ≤ 2^53 - 1 | `number` | `number` — unchanged |
+| `insertId` > 2^53 - 1 | `number` (lossy) | `string` (exact) |
+
+> **[PINNED by tests/22-bigint-as-string.test.ts]** Flag-on: safe-range BIGINT → number; over-range (signed and negative) → exact decimal string; insertId follows the same rule.
+
 ### 4.3 `insertId`
 
-- Returned by `MySQL.insert` as JavaScript `number` (pool option `insertIdAsNumber: true`, plus explicit `Number()` wrap in `parseResponse`).
+- Default (flag off): returned by `MySQL.insert` as JavaScript `number` (pool option `insertIdAsNumber: true`, plus explicit `Number()` wrap in `parseResponse`).
+- With `mysql_bigint_as_string = true`: `number` when safely representable, decimal string when not. See §4.1.1.
 - `null` when the connector did not produce one.
 
 ### 4.4 `BIT(n)`
@@ -308,14 +331,33 @@ All values documented here are what reaches the Lua callback.
 | Column type | Representation |
 |-------------|----------------|
 | `DATETIME`, `DATETIME2`, `TIMESTAMP`, `TIMESTAMP2`, `NEWDATE` | JavaScript `number`, milliseconds since Unix epoch (UTC). Parsed via `new Date(connectorString).getTime()`. |
-| `DATE` | JavaScript `number`, milliseconds since Unix epoch. Parsed via `new Date(value + ' 00:00:00').getTime()` — **the server process's local timezone is used**. |
+| `DATE` **default (flag off)** | JavaScript `number`, milliseconds since Unix epoch. Parsed via `new Date(value + ' 00:00:00').getTime()` — **the server process's local timezone is used**. |
+| `DATE`, **`mysql_date_as_utc = true`** | JavaScript `number`, midnight UTC ms. Parsed via `new Date(\`${value}T00:00:00Z\`).getTime()`. DST-immune; see §5.1. |
 | `TIME` | Defers to connector default (string `"HH:MM:SS"`). |
 | `YEAR` | Defers to connector default (number). |
 | `NULL` values | `null`. |
 
-> **[PHASE-4]** Pin `DATETIME` / `TIMESTAMP` round-tripping across common session timezones. Document that the value returned is UTC ms from `Date.parse` on whatever string mariadb emits.
-> **[PHASE-4]** Pin `DATE` behavior across a DST transition. The current local-tz handling can produce a 23h or 25h offset on DST days. Test locks observed behavior so any fix is deliberate.
-> **[PHASE-4]** Pin `NULL` datetime → `null` (not the epoch `0`).
+> **[PINNED by tests/06-dates.test.ts]** Flag-off: DATE parses in process-local tz; DST transitions produce 23h/25h deltas on DST-observing hosts; `DATETIME` / `TIMESTAMP` round-trip; `NULL` returns `null` (not `0`).
+
+#### 5.1 `mysql_date_as_utc` convar (3.x+)
+
+**Default:** `false` (preserves the pinned local-tz behaviour).
+**Scope:** affects only the `DATE` typeCast branch. `DATETIME`, `TIMESTAMP`, `TIME`, `YEAR` are untouched.
+
+Setting the flag to `true`:
+
+- `DATE` columns parse as `${value}T00:00:00Z` — midnight UTC. Adjacent dates always have a 24-hour delta, regardless of DST or the host OS timezone.
+- `NULL` still returns `null`.
+- No pool rebuild required — the flag is read by `typeCast` on every column decode.
+
+| Shape | Flag off (default) | Flag on (corrected) |
+|-------|--------------------|---------------------|
+| `DATE '2024-06-15'` in `TZ=UTC` | `Date.UTC(2024, 5, 15)` | `Date.UTC(2024, 5, 15)` — unchanged |
+| `DATE '2024-06-15'` in `TZ=America/New_York` | `Date.UTC(2024, 5, 15) + 4h` (tz-offset) | `Date.UTC(2024, 5, 15)` |
+| `DATE '2024-03-10' → '2024-03-11'` delta (DST spring-forward) | 23h in `TZ=America/New_York` | 24h always |
+| `DATE NULL` | `null` | `null` — unchanged |
+
+> **[PINNED by tests/06-dates.test.ts]** Flag-on: DATE returns midnight UTC ms; DST-straddling dates have a 24h delta; `DATETIME` is unaffected.
 
 ---
 

@@ -1,6 +1,6 @@
 import { createPool } from 'mariadb';
 import type { Pool, PoolConfig } from 'mariadb';
-import { mysql_transaction_isolation_level } from '../config';
+import { mysql_transaction_isolation_level, mysql_bigint_as_string } from '../config';
 import { typeCast } from '../utils/typeCast';
 import { print } from '../utils/events';
 import { parentPort } from 'worker_threads';
@@ -45,13 +45,21 @@ export async function resetPool(): Promise<void> {
 
 export async function createConnectionPool(options: PoolConfig) {
   try {
+    // `mysql_bigint_as_string` flips the connector from number-with-
+    // precision-loss to BigInt-for-everything. typeCast / parseResponse
+    // then convert BigInts back to `number` when safely representable
+    // and to lexical strings when not. Flag off preserves the exact
+    // historical behaviour (number for every BIGINT / insertId, lossy
+    // above 2^53). See compat-matrix §4.1 / §4.3.
+    const numericAsNumber = !mysql_bigint_as_string;
+
     const dbPool = createPool({
       ...options,
       typeCast,
       initSql: mysql_transaction_isolation_level,
       checkDuplicate: false,
-      bigIntAsNumber: true,
-      insertIdAsNumber: true,
+      bigIntAsNumber: numericAsNumber,
+      insertIdAsNumber: numericAsNumber,
       // Match the mysql2 / mysql-async contract: JSON columns arrive in the
       // result as strings. Consumers (qbx_properties, qbx_spawn, …) call
       // json.decode() on them from Lua. The mariadb connector has TWO
