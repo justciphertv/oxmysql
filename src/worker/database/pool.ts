@@ -22,6 +22,27 @@ export async function awaitPool(): Promise<Pool> {
   return pool;
 }
 
+/**
+ * Tear down the current pool and reset module state so a subsequent
+ * `createConnectionPool` call rebuilds from scratch. Intended for the
+ * benchmark harness and for potential future CLI tooling that needs to
+ * re-open the pool with different options. NOT called from production
+ * code paths — graceful shutdown uses `pool?.end()` directly and then
+ * exits the worker process.
+ */
+export async function resetPool(): Promise<void> {
+  if (pool) {
+    try {
+      await pool.end();
+    } catch {
+      /* best-effort teardown; a poisoned connector should not prevent
+       * the next bench iteration from recreating the pool. */
+    }
+  }
+  pool = null;
+  dbVersion = '';
+}
+
 export async function createConnectionPool(options: PoolConfig) {
   try {
     const dbPool = createPool({

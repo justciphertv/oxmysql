@@ -17,7 +17,13 @@ export function buildPoolOptions(overrides: Record<string, unknown> = {}) {
     user: TEST_ENV.user,
     password: TEST_ENV.password,
     database: TEST_ENV.database,
-    connectionLimit: 4,
+    // Matches the mariadb connector's production default. The previous
+    // fixture used `4`, which made Phase 1 pool-wait numbers look much
+    // worse than any realistic deployment would see (see Phase 2
+    // findings in docs/performance-tuning.md). The bench harness still
+    // accepts `--connectionLimits=...` to override for contention
+    // stress tests.
+    connectionLimit: 10,
     connectTimeout: 10_000,
     ...overrides,
   };

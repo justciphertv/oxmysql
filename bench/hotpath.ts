@@ -34,6 +34,7 @@ import {
   rawExecute,
   rawQuery,
   rawTransaction,
+  reinitHarness,
   getPool,
 } from '../tests/helpers/worker-harness';
 import * as perf from '../src/worker/utils/perf';
@@ -175,20 +176,44 @@ const scenarios: Scenario[] = [
 
 // ── Harness ─────────────────────────────────────────────────────────────
 
-const concLevels = [1, 16, 32];
-const WARMUP = 50;
-const ITERATIONS = 1_000;
+function parseIntList(argName: string, fallback: number[]): number[] {
+  const arg = process.argv.find((a) => a.startsWith(`--${argName}=`));
+  if (!arg) return fallback;
+  const parts = arg
+    .slice(`--${argName}=`.length)
+    .split(',')
+    .map((s) => Number.parseInt(s.trim(), 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return parts.length > 0 ? parts : fallback;
+}
+
+function parseIntArg(argName: string, fallback: number): number {
+  const arg = process.argv.find((a) => a.startsWith(`--${argName}=`));
+  if (!arg) return fallback;
+  const n = Number.parseInt(arg.slice(`--${argName}=`.length).trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+const concLevels = parseIntList('concurrencies', [1, 16, 32]);
+const connectionLimits = parseIntList('connectionLimits', [0]); // 0 = use fixture default
+const WARMUP = parseIntArg('warmup', 50);
+const ITERATIONS = parseIntArg('iterations', 1_000);
 
 type RunResult = {
   scenario: string;
   concurrency: number;
+  connectionLimit: number;
   iterations: number;
   wallMs: number;
   opsPerSec: number;
   breakdown: Map<string, perf.PerfPhaseStats>;
 };
 
-async function runScenario(scenario: Scenario, concurrency: number): Promise<RunResult> {
+async function runScenario(
+  scenario: Scenario,
+  concurrency: number,
+  connectionLimit: number,
+): Promise<RunResult> {
   if (scenario.setup) await scenario.setup();
 
   // Warm up — exercise the path so JIT / connection pool reaches steady
@@ -220,6 +245,7 @@ async function runScenario(scenario: Scenario, concurrency: number): Promise<Run
   return {
     scenario: scenario.name,
     concurrency,
+    connectionLimit,
     iterations: ITERATIONS,
     wallMs,
     opsPerSec: (ITERATIONS / wallMs) * 1000,
@@ -229,8 +255,9 @@ async function runScenario(scenario: Scenario, concurrency: number): Promise<Run
 
 function formatResult(r: RunResult): string {
   const lines: string[] = [];
+  const cl = r.connectionLimit > 0 ? ` connLimit=${r.connectionLimit}` : '';
   lines.push(
-    `=== ${r.scenario}  conc=${r.concurrency}  n=${r.iterations}  ` +
+    `=== ${r.scenario}  conc=${r.concurrency}${cl}  n=${r.iterations}  ` +
       `wall=${r.wallMs.toFixed(0)}ms  ops/s=${r.opsPerSec.toFixed(0)} ===`,
   );
 
@@ -270,49 +297,70 @@ function scenarioMatches(name: string, filter: string[] | null): boolean {
 
 // ── Main ────────────────────────────────────────────────────────────────
 
-async function main() {
-  // eslint-disable-next-line no-console
-  console.log('[bench] initializing harness...');
-  await initHarness();
-  // eslint-disable-next-line no-console
-  console.log(`[bench] warmup=${WARMUP}  iterations=${ITERATIONS}  concurrencies=${concLevels.join(',')}`);
+async function initForLimit(connectionLimit: number): Promise<void> {
+  const poolOverrides = connectionLimit > 0 ? { connectionLimit } : undefined;
+  await reinitHarness(poolOverrides ? { poolOverrides } : {});
+}
 
+async function main() {
   const filter = parseOnlyFilter();
   const active = scenarios.filter((s) => scenarioMatches(s.name, filter));
-  if (filter)
-    // eslint-disable-next-line no-console
-    console.log(`[bench] filter ${JSON.stringify(filter)} → ${active.length}/${scenarios.length} scenarios`);
+
+  // eslint-disable-next-line no-console
+  console.log('[bench] initializing harness...');
+  // First init picks the first connectionLimit (or fixture default when 0).
+  await initForLimit(connectionLimits[0]);
+
+  // eslint-disable-next-line no-console
+  console.log(
+    `[bench] warmup=${WARMUP} iterations=${ITERATIONS} ` +
+      `concurrencies=${concLevels.join(',')} ` +
+      `connectionLimits=${connectionLimits.join(',')}` +
+      (filter ? `  filter=${JSON.stringify(filter)} (${active.length}/${scenarios.length} scenarios)` : ''),
+  );
 
   const results: RunResult[] = [];
 
-  for (const scenario of active) {
-    for (const conc of concLevels) {
-      const r = await runScenario(scenario, conc);
-      results.push(r);
+  for (let li = 0; li < connectionLimits.length; li++) {
+    const limit = connectionLimits[li];
+    if (li > 0) {
       // eslint-disable-next-line no-console
-      console.log('\n' + formatResult(r));
+      console.log(`\n[bench] reinit pool with connectionLimit=${limit || 'default'}`);
+      await initForLimit(limit);
+    }
+
+    for (const scenario of active) {
+      for (const conc of concLevels) {
+        const r = await runScenario(scenario, conc, limit);
+        results.push(r);
+        // eslint-disable-next-line no-console
+        console.log('\n' + formatResult(r));
+      }
     }
   }
 
-  // Compact summary grid.
-  // eslint-disable-next-line no-console
-  console.log('\n=== summary (ops/s) ===');
+  // Compact summary grid: one block per connection limit.
   const scenarioNames = [...new Set(results.map((r) => r.scenario))];
-  const header =
-    'scenario'.padEnd(32) + concLevels.map((c) => `conc=${c}`.padStart(12)).join('');
-  // eslint-disable-next-line no-console
-  console.log(header);
-  for (const name of scenarioNames) {
-    const row =
-      name.padEnd(32) +
-      concLevels
-        .map((c) => {
-          const r = results.find((x) => x.scenario === name && x.concurrency === c);
-          return (r ? r.opsPerSec.toFixed(0) : '—').padStart(12);
-        })
-        .join('');
+  for (const limit of connectionLimits) {
     // eslint-disable-next-line no-console
-    console.log(row);
+    console.log(`\n=== summary (ops/s) connectionLimit=${limit || 'default'} ===`);
+    const header = 'scenario'.padEnd(32) + concLevels.map((c) => `conc=${c}`.padStart(12)).join('');
+    // eslint-disable-next-line no-console
+    console.log(header);
+    for (const name of scenarioNames) {
+      const row =
+        name.padEnd(32) +
+        concLevels
+          .map((c) => {
+            const r = results.find(
+              (x) => x.scenario === name && x.concurrency === c && x.connectionLimit === limit,
+            );
+            return (r ? r.opsPerSec.toFixed(0) : '—').padStart(12);
+          })
+          .join('');
+      // eslint-disable-next-line no-console
+      console.log(row);
+    }
   }
 
   process.exit(0);

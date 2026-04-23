@@ -49,9 +49,11 @@ export const rawTransaction = async (
   }
 
   const totalStart = perf.now();
-  const acquireStart = perf.now();
+  // `getConnection` already records its own `getConnection:pool.getConnection`
+  // phase. A second timer wrapping the same `await getConnection()` measures
+  // exactly the same span within timing noise (~5us differences observed in
+  // Phase 2 sweeps) — drop it to keep the perf report uncluttered.
   using connection = await getConnection();
-  perf.mark('rawTransaction:getConnection', acquireStart);
 
   if (!connection) return { error: `${invokingResource} was unable to acquire a database connection.` };
 

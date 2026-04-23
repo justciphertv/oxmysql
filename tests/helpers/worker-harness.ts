@@ -9,7 +9,7 @@ import type { CFXParameters, QueryType, TransactionQuery } from '../../src/types
 
 // The imports below intentionally go through the real source files — we are
 // exercising the actual shaping / parse logic, not re-implementing it.
-import { createConnectionPool, pool } from '../../src/worker/database/pool';
+import { createConnectionPool, pool, resetPool } from '../../src/worker/database/pool';
 import { rawQuery } from '../../src/worker/database/rawQuery';
 import { rawExecute } from '../../src/worker/database/rawExecute';
 import { rawTransaction } from '../../src/worker/database/rawTransaction';
@@ -53,6 +53,18 @@ export async function initHarness(opts: HarnessInit = {}) {
 export function getPool() {
   if (!pool) throw new Error('Harness pool not initialized. Call initHarness() first.');
   return pool;
+}
+
+/**
+ * Tear down the current pool, clear the `initialized` flag, and (if
+ * `opts` is provided) re-initialise with new pool options. Intended for
+ * benchmark harnesses that sweep pool settings; not used by the vitest
+ * suite which keeps the same pool for every test.
+ */
+export async function reinitHarness(opts: HarnessInit = {}): Promise<void> {
+  await resetPool();
+  initialized = false;
+  await initHarness(opts);
 }
 
 // Convenience re-exports so tests don't have to reach into src/ directly.
