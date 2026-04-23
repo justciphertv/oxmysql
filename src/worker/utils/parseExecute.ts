@@ -3,7 +3,15 @@ import type { CFXParameters } from '../../types';
 export const executeType = (query: string) => {
   if (typeof query !== 'string') throw new Error(`Expected query to be a string but received ${typeof query} instead.`);
 
-  switch (query.substring(0, query.indexOf(' '))) {
+  // Normalise: strip leading whitespace and uppercase the first keyword.
+  // Prior to 3.2.0 this matched the first word byte-exact, so a lowercase
+  // DML query (`insert into ...`) was misclassified as SELECT and the
+  // unpack path in rawExecute returned the wrong shape (audit H10).
+  const trimmed = query.trimStart();
+  const firstSpace = trimmed.indexOf(' ');
+  const firstWord = (firstSpace === -1 ? trimmed : trimmed.substring(0, firstSpace)).toUpperCase();
+
+  switch (firstWord) {
     case 'INSERT':
       return 'insert';
     case 'UPDATE':

@@ -1,0 +1,98 @@
+name: Tests
+
+# Runs the vitest suite against the disposable MariaDB container defined in
+# tests/compose.yml. The harness tests worker internals against a real
+# database, so CI needs Docker — which ubuntu-latest has.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Full vitest suite — pins the default + every flag-on describe block
+  # in a single pass. This is the release gate.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Start MariaDB fixture
+        run: docker compose -f tests/compose.yml up -d --wait
+
+      - name: Run full test suite
+        run: bun run test
+
+      - name: MariaDB container logs (on failure)
+        if: failure()
+        run: docker compose -f tests/compose.yml logs mariadb
+
+      - name: Tear down MariaDB fixture
+        if: always()
+        run: docker compose -f tests/compose.yml down -v
+
+  # Smoke matrix — runs `tests/smoke.test.ts` under each of the four
+  # release-blessed modes. The smoke test asserts only flag-invariant
+  # properties (plus one mode-aware assertion that cross-checks the
+  # plumbing), so any unexpected interaction between a correctness flag
+  # and the rest of the worker surfaces here before the full suite.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: defaults
+            env: {}
+          - mode: perf-trace
+            env:
+              OXMYSQL_PERF_TRACE: '1'
+          - mode: bigint-as-string
+            env:
+              OXMYSQL_TEST_BIGINT_AS_STRING: '1'
+          - mode: date-as-utc
+            env:
+              OXMYSQL_TEST_DATE_AS_UTC: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Start MariaDB fixture
+        run: docker compose -f tests/compose.yml up -d --wait
+
+      - name: Run smoke test (${{ matrix.mode }})
+        env: ${{ matrix.env }}
+        run: bun run test:smoke
+
+      - name: MariaDB container logs (on failure)
+        if: failure()
+        run: docker compose -f tests/compose.yml logs mariadb
+
+      - name: Tear down MariaDB fixture
+        if: always()
+        run: docker compose -f tests/compose.yml down -v

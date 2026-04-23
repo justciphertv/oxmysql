@@ -1,48 +1,82 @@
 name: Create release
 
+# Fires on stable semver tag pushes only. Prerelease-shaped tags
+# (`v*.*.*-beta.*`, `v*.*.*-rc.*`, …) are handled by beta.yml and are
+# excluded here so a single tag never triggers both workflows.
+#
+# Deliberate departures from the upstream inherited workflow:
+#
+#   - Checks out `github.sha` (the tagged commit) instead of
+#     `default_branch`. Tags in this fork live on `mariadb-patch`, not
+#     `main`; checking out `main` would build the wrong source tree and
+#     — under the old workflow — even moved the tag to a brand-new
+#     commit on main. Both failure modes are fixed by binding the
+#     checkout to the tag itself.
+#
+#   - Does NOT commit a `chore: bump version to vX.Y.Z` back to any
+#     branch. build.js already rewrites package.json at build time from
+#     the TGT_RELEASE_VERSION env var; the committed version on
+#     `mariadb-patch` is bumped by hand as part of the release PR, so
+#     an automated write-back here would either duplicate the work or
+#     (worse) land on whatever branch the checkout happened to resolve.
+#
+#   - Does NOT run `EndBug/latest-tag@v1`. That action rewrote the
+#     current tag to point at the workflow's HEAD commit — acceptable
+#     on a single-branch upstream setup, catastrophic on a fork where
+#     the tagged commit and the default branch differ.
+
 on:
   push:
     tags:
       - 'v*.*.*'
+      - '!v*.*.*-*'
 
 permissions:
   contents: write
 
 jobs:
   create-release:
-    if: github.actor_id != 210085057
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Install zip
-        run: sudo apt install zip
+        run: sudo apt-get update && sudo apt-get install -y zip
 
       - name: Install Bun
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Get latest code
+      - name: Checkout tagged commit
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
-          ref: ${{ github.event.repository.default_branch }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Start MariaDB fixture
+        run: docker compose -f tests/compose.yml up -d --wait
+
+      - name: Run test suite
+        run: bun run test
+
+      - name: Tear down MariaDB fixture
+        if: always()
+        run: docker compose -f tests/compose.yml down -v
+
       - name: Run build script
         run: bun run build
         env:
+          # build.js rewrites package.json.version to this value (with
+          # the leading 'v' stripped) before building. The committed
+          # version on mariadb-patch stays the source of truth; this
+          # env var just guarantees the release artefact advertises the
+          # tag name even if the source tree is briefly out of sync
+          # during a hotfix.
           TGT_RELEASE_VERSION: ${{ github.ref_name }}
-
-      - name: Push version bump change
-        uses: EndBug/add-and-commit@v9
-        with:
-          add: package.json
-          push: true
-          default_author: github_actions
-          message: 'chore: bump version to ${{ github.ref_name }}'
 
       - name: Bundle files
         run: |
@@ -54,21 +88,11 @@ jobs:
           cd ./temp && zip -r ../oxmysql.zip ./oxmysql
 
       - name: Create release
-        uses: 'marvinpinto/action-automatic-releases@v1.2.1'
+        uses: softprops/action-gh-release@v2
         with:
-          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
           prerelease: false
           files: oxmysql.zip
-
-      - name: Update tag
-        uses: EndBug/latest-tag@v1
-        with:
-          ref: ${{ github.ref_name }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-
-      - name: Publish package to npm registry
-        run: npm publish --access public
+          fail_on_unmatched_files: true

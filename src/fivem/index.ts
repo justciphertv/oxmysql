@@ -3,6 +3,8 @@ import path from 'path';
 import type { CFXCallback, CFXParameters, TransactionQuery } from '../types';
 import ghmatti from '../compatibility/ghmattimysql';
 import mysqlAsync from '../compatibility/mysql-async';
+import { WorkerChannel } from './channel';
+import { buildConnectionOptions as buildConnectionOptionsFromString } from './connection-string';
 import('../update');
 
 // ─── Worker setup ────────────────────────────────────────────────────────────
@@ -11,20 +13,31 @@ const resourceName = GetCurrentResourceName();
 const resourcePath = GetResourcePath(resourceName);
 const worker = new Worker(path.join(resourcePath, 'dist/worker.js'));
 
-// FiveM → Worker request/response plumbing
-let nextRequestId = 0;
-const pendingRequests = new Map<number, (data: any) => void>();
+// Opt-in per-request timeout. 0 = feature disabled, every request stays
+// pending until answered (matches the pre-Phase-5 contract pinned in
+// compat-matrix §10.3). When set, a request that has not received a
+// response in this many ms resolves with an `{ error }` payload and emits
+// an `oxmysql:error` event with `phase: 'timeout'`.
+const mysql_request_timeout_ms = GetConvarInt('mysql_request_timeout_ms', 0);
+
+const channel = new WorkerChannel(worker, {
+  defaultTimeoutMs: mysql_request_timeout_ms,
+  onSynthesizedError: ({ action, reason }) => {
+    console.error(reason);
+    try {
+      emit('oxmysql:error', { phase: 'timeout', action, message: reason });
+    } catch {
+      /* ignore — emit may be unavailable if resource is mid-shutdown */
+    }
+  },
+});
 
 function sendToWorker<T = any>(action: string, data: any): Promise<T> {
-  return new Promise((resolve) => {
-    const id = nextRequestId++;
-    pendingRequests.set(id, resolve);
-    worker.postMessage({ action, id, data });
-  });
+  return channel.send<T>(action, data);
 }
 
 function emitToWorker(action: string, data?: any): void {
-  worker.postMessage({ action, data });
+  channel.emit(action, data);
 }
 
 // ─── Logger state (requires FiveM APIs) ──────────────────────────────────────
@@ -66,9 +79,7 @@ worker.on('message', (message: { action: string; id?: number; data: any }) => {
   const { action, id, data } = message;
 
   if (action === 'response' && id !== undefined) {
-    const resolve = pendingRequests.get(id);
-    resolve?.(data);
-    pendingRequests.delete(id);
+    channel.deliver(id, data);
     return;
   }
 
@@ -109,74 +120,61 @@ worker.on('message', (message: { action: string; id?: number; data: any }) => {
 
 worker.on('error', (err) => {
   console.error('oxmysql worker error:', err);
+  try {
+    emit('oxmysql:error', {
+      phase: 'worker',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  } catch {
+    /* ignore */
+  }
+});
+
+// Graceful teardown. When the resource stops (server shutdown, `restart
+// oxmysql`, etc.) ask the worker to flush the pool and exit cleanly, then
+// terminate the worker after a short grace window if it has not already
+// exited. Without this, FXServer leaves the worker's connections dangling
+// until the process tears them down — observable as orphan MariaDB
+// sessions between hot-restarts.
+const SHUTDOWN_GRACE_MS = 2000;
+on(`onResourceStop`, (stoppedResource: string) => {
+  if (stoppedResource !== resourceName) return;
+  try {
+    channel.emit('shutdown');
+  } catch {
+    /* worker already gone; terminate below will no-op */
+  }
+  setTimeout(() => {
+    try {
+      worker.terminate();
+    } catch {
+      /* already terminated */
+    }
+  }, SHUTDOWN_GRACE_MS);
+});
+
+worker.on('exit', (code) => {
+  // The WorkerChannel's own exit handler drains pending requests with
+  // synthesized errors. This listener is only for operator-visible logging
+  // so the failure mode is obvious in the FXServer console.
+  console.error(
+    `^1[oxmysql] worker exited (code ${code}). All in-flight queries rejected. ` +
+      `Restart the resource to re-spawn the worker.^0`,
+  );
+  try {
+    emit('oxmysql:error', { phase: 'worker-exit', code });
+  } catch {
+    /* ignore */
+  }
 });
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-function parseUri(connectionString: string) {
-  const match = connectionString.match(
-    new RegExp(
-      '^(?:([^:/?#.]+):)?(?://(?:([^/?#]*)@)?([\\w\\d\\-\\u0100-\\uffff.%]*)(?::([0-9]+))?)?([^?#]+)?(?:\\?([^#]*))?$'
-    )
-  ) as RegExpMatchArray;
-
-  if (!match) throw new Error(`mysql_connection_string structure was invalid (${connectionString})`);
-
-  const authTarget = match[2] ? match[2].split(':') : [];
-
-  return {
-    user: authTarget[0] || undefined,
-    password: authTarget[1] || undefined,
-    host: match[3],
-    port: parseInt(match[4]),
-    database: match[5]?.replace(/^\/+/, ''),
-    ...(match[6] &&
-      match[6].split('&').reduce<Record<string, string>>((acc, param) => {
-        const [key, value] = param.split('=');
-        if (key && value) acc[key] = value;
-        return acc;
-      }, {})),
-  };
-}
-
 function buildConnectionOptions() {
   const mysql_connection_string = GetConvar('mysql_connection_string', '');
-
-  const raw: Record<string, any> = mysql_connection_string.includes('mysql://')
-    ? parseUri(mysql_connection_string)
-    : mysql_connection_string
-        .replace(/(?:host(?:name)|ip|server|data\s?source|addr(?:ess)?)=/gi, 'host=')
-        .replace(/(?:user\s?(?:id|name)?|uid)=/gi, 'user=')
-        .replace(/(?:pwd|pass)=/gi, 'password=')
-        .replace(/(?:db)=/gi, 'database=')
-        .split(';')
-        .reduce<Record<string, string>>((acc, param) => {
-          const [key, value] = param.split('=');
-          if (key) acc[key] = value;
-          return acc;
-        }, {});
-
-  for (const key of ['ssl']) {
-    if (typeof raw[key] === 'string') {
-      try {
-        raw[key] = JSON.parse(raw[key]);
-      } catch {
-        console.log(`^3Failed to parse property ${key} in configuration!^0`);
-      }
-    }
-  }
-
-  // Preserve the user's namedPlaceholders preference (string 'false' means they opted out)
-  // before we set namedPlaceholders:false on the pool to disable mariadb's own handling.
-  const userNamedPlaceholders = raw.namedPlaceholders;
-
-  return {
-    connectTimeout: 60000,
-    bigIntAsNumber: true,
-    ...raw,
-    namedPlaceholders: false, // disable mariadb's built-in handling; we do it ourselves
-    _userNamedPlaceholders: userNamedPlaceholders,
-  };
+  return buildConnectionOptionsFromString(mysql_connection_string, (msg) =>
+    console.log(`^3${msg}^0`),
+  );
 }
 
 function readConfig() {
@@ -210,6 +208,49 @@ const mysql_transaction_isolation_level = `SET TRANSACTION ISOLATION LEVEL ${
   isolationLevelMap[isolationLevel] ?? 'READ COMMITTED'
 }`;
 
+// Retry interval for the worker's pool-creation loop. Default matches the
+// pre-Phase-5.3 cadence (30 s). Operators on a fast-bring-up VPS can
+// shorten it; clamped to >= 1s worker-side.
+const mysql_init_retry_ms = GetConvarInt('mysql_init_retry_ms', 30_000);
+
+// Opt-in propagation of commit / rollback failures from
+// `MySQL.startTransaction`. Default preserves the pinned 3.1.0 behaviour
+// (commit errors are swallowed; the function returns a plain boolean).
+// When set to 'true', an endTransaction that fails on the commit or
+// rollback causes MySQL.startTransaction to throw an Error containing
+// the worker-reported reason. Only affects MySQL.startTransaction /
+// endTransaction; MySQL.transaction and every other API are unchanged.
+const mysql_start_transaction_propagate_errors =
+  GetConvar('mysql_start_transaction_propagate_errors', 'false') === 'true';
+
+// Opt-in corrected BIT typeCast behaviour (audit H6 + H6b).
+// Default preserves the pinned 3.1.0 behaviour: BIT(1) NULL returns false,
+// BIT(n>1) returns only the first byte. When 'true':
+//   - BIT(1) NULL returns null.
+//   - BIT(n>1) returns the full decoded big-endian integer. number when
+//     safely representable (<= 2^53 - 1), bigint otherwise.
+// See compat-matrix §4.4.
+const mysql_bit_full_integer =
+  GetConvar('mysql_bit_full_integer', 'false') === 'true';
+
+// Opt-in corrected BIGINT / insertId handling. Default preserves
+// historical lossy Number coercion above 2^53. When true, the worker
+// pool runs with `bigIntAsNumber: false`, the BIGINT typeCast branch
+// returns `string` for values outside MAX_SAFE_INTEGER range, and
+// parseResponse stringifies large `insertId` values. Takes effect at
+// worker init — restart the resource after flipping it.
+// See compat-matrix §4.1 / §4.3.
+const mysql_bigint_as_string =
+  GetConvar('mysql_bigint_as_string', 'false') === 'true';
+
+// Opt-in UTC DATE parsing. Default preserves the historical process-
+// local-timezone parse (which suffers 23h/25h deltas on DST days).
+// When true, DATE columns are parsed as `YYYY-MM-DDT00:00:00Z` → UTC
+// midnight, giving DST-immune arithmetic regardless of the FXServer
+// host's TZ setting. See compat-matrix §5.
+const mysql_date_as_utc =
+  GetConvar('mysql_date_as_utc', 'false') === 'true';
+
 const connectionOptions = buildConnectionOptions();
 
 // Extract and remove the sentinel before sending options to the mariadb pool.
@@ -220,13 +261,31 @@ worker.postMessage({
   data: {
     connectionOptions: poolOptions,
     mysql_transaction_isolation_level,
+    mysql_init_retry_ms,
+    mysql_bit_full_integer,
+    mysql_bigint_as_string,
+    mysql_date_as_utc,
     mysql_debug: false,
     namedPlaceholders: userNamedPlaceholders,
   },
 });
 
 readConfig();
-setInterval(readConfig, 1000);
+// Subscribe to convar changes instead of polling every 1s. FXServer
+// fires the listener when any matching convar changes via the console
+// or SetConvar. The `mysql_*` filter catches every convar readConfig
+// reads plus the ones it does not (bootstrap-only like
+// mysql_connection_string); firing readConfig on any of them is cheap
+// and keeps the handler logic in one place. Audit item H1.
+if (typeof AddConvarChangeListener === 'function') {
+  AddConvarChangeListener('mysql_*', () => readConfig());
+} else {
+  // Extremely old FXServer artifact without AddConvarChangeListener —
+  // fall back to the pre-3.2.0 1s poll so convar changes are still
+  // picked up. Release workflow declares /server:12913 and later which
+  // always exposes the native, but keep the fallback for safety.
+  setInterval(readConfig, 1000);
+}
 
 // ─── oxmysql_debug command ────────────────────────────────────────────────────
 
@@ -235,25 +294,58 @@ RegisterCommand(
   (source: number, args: string[]) => {
     if (source !== 0) return console.log('^3This command can only be run server side^0');
 
+    // An operator who sets `mysql_debug` to a non-array JSON value
+    // (e.g. `set mysql_debug "true"`) would previously crash this
+    // command at JSON.parse + arr.push. Decode defensively, accepting
+    // either 'false' or a JSON-encoded string[], and fall back to an
+    // empty list on any parse error.
+    let arr: string[] = [];
     const current = GetConvar('mysql_debug', 'false');
-    let arr: string[] = current === 'false' ? [] : JSON.parse(current);
+    if (current !== 'false') {
+      try {
+        const parsed = JSON.parse(current);
+        if (Array.isArray(parsed) && parsed.every((v) => typeof v === 'string')) {
+          arr = parsed as string[];
+        } else {
+          console.log(
+            `^3mysql_debug is not a JSON array of resource names (was ${current}); treating as empty^0`,
+          );
+        }
+      } catch {
+        console.log(
+          `^3mysql_debug could not be parsed as JSON (was ${current}); treating as empty^0`,
+        );
+      }
+    }
 
     switch (args[0]) {
-      case 'add':
-        arr.push(args[1]);
+      case 'add': {
+        const name = args[1];
+        if (typeof name !== 'string' || name.length === 0) {
+          return console.log(`^3Usage: oxmysql_debug add <resource>^0`);
+        }
+        if (arr.includes(name)) {
+          return console.log(`^3${name} is already in mysql_debug^0`);
+        }
+        arr.push(name);
         SetConvar('mysql_debug', JSON.stringify(arr));
-        return console.log(`^3Added ${args[1]} to mysql_debug^0`);
+        return console.log(`^3Added ${name} to mysql_debug^0`);
+      }
 
       case 'remove': {
-        const idx = arr.indexOf(args[1]);
-        if (idx === -1) return;
+        const name = args[1];
+        if (typeof name !== 'string' || name.length === 0) {
+          return console.log(`^3Usage: oxmysql_debug remove <resource>^0`);
+        }
+        const idx = arr.indexOf(name);
+        if (idx === -1) return console.log(`^3${name} is not in mysql_debug^0`);
         arr.splice(idx, 1);
         SetConvar('mysql_debug', arr.length === 0 ? 'false' : JSON.stringify(arr));
-        return console.log(`^3Removed ${args[1]} from mysql_debug^0`);
+        return console.log(`^3Removed ${name} from mysql_debug^0`);
       }
 
       default:
-        return console.log(`^3Usage: oxmysql add|remove <resource>^0`);
+        return console.log(`^3Usage: oxmysql_debug add|remove <resource>^0`);
     }
   },
   true
@@ -321,15 +413,24 @@ onNet(
     search: string;
     sortBy?: { id: 'query' | 'executionTime'; desc: boolean }[];
   }) => {
-    if (typeof data.resource !== 'string' || !IsPlayerAceAllowed(source as unknown as string, 'command.mysql')) return;
+    // `source` inside a net-event handler is the CFX-provided numeric
+    // player-src. IsPlayerAceAllowed's type declaration expects a string,
+    // so coerce via String() instead of a double-cast. FXServer accepts
+    // either shape at runtime; this is just a typed-bridge cleanup.
+    if (typeof data.resource !== 'string' || !IsPlayerAceAllowed(String(source), 'command.mysql')) return;
+
+    // Guard before the filter: a missing resource + non-empty search
+    // previously threw TypeError on `undefined.filter(...)`. Short-
+    // circuit to the same no-op the downstream `if (!resourceLog)`
+    // already performed for the empty-search branch.
+    const bucket = logStorage[data.resource];
+    if (!bucket) return;
 
     if (data.search) data.search = data.search.toLowerCase();
 
     const resourceLog = data.search
-      ? logStorage[data.resource].filter((q) => q.query.toLowerCase().includes(data.search))
-      : logStorage[data.resource];
-
-    if (!resourceLog) return;
+      ? bucket.filter((q) => q.query.toLowerCase().includes(data.search))
+      : bucket;
 
     const sort = data.sortBy && data.sortBy.length > 0 ? data.sortBy[0] : false;
     const startRow = data.pageIndex * 10;
@@ -487,33 +588,80 @@ MySQL.transaction = (
   );
 };
 
+const START_TRANSACTION_TIMEOUT_MS = 30_000;
+
+let startTransactionWarned = false;
 MySQL.startTransaction = async (
   transactions: (queryFn: (sql: string, values: CFXParameters) => Promise<any>) => Promise<boolean>,
   invokingResource = GetInvokingResource()
 ) => {
-  console.warn(`MySQL.startTransaction is "experimental" and may receive breaking changes.`);
+  if (!startTransactionWarned) {
+    startTransactionWarned = true;
+    console.warn(`MySQL.startTransaction is "experimental" and may receive breaking changes.`);
+  }
 
   const beginResult = await sendToWorker<{ connectionId: number } | { error: string }>('beginTransaction', {
     invokingResource,
   });
 
   if ('error' in beginResult) {
+    if (mysql_start_transaction_propagate_errors) {
+      throw new Error(beginResult.error);
+    }
     console.error(beginResult.error);
     return false;
   }
 
   const { connectionId } = beginResult;
   let commit = false;
-  let closed = false;
+  // `finalized` guards against double-finalization when the timeout
+  // handler and the normal completion path both try to send
+  // endTransaction. Whichever runs first wins.
+  let finalized = false;
+
+  // AbortController drives the race-free queryFn gate (audit M1). The
+  // abort signal is raised either on timeout or after a final
+  // endTransaction has been dispatched; queryFn checks it before AND
+  // after every sendToWorker call so an in-flight response that lands
+  // after the rollback does not silently succeed.
+  const ac = new AbortController();
+  const signal = ac.signal;
+
+  async function finalize(withCommit: boolean): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (finalized) return { ok: true };
+    finalized = true;
+    if (mysql_start_transaction_propagate_errors) {
+      // Request-response variant so the parent learns about a failed
+      // commit / rollback and can surface it.
+      const resp = await sendToWorker<{ result: true } | { error: string }>('endTransaction', {
+        connectionId,
+        commit: withCommit,
+      });
+      if ('error' in resp) return { ok: false, error: resp.error };
+      return { ok: true };
+    }
+    // Default path — fire-and-forget, preserves 3.1.0 behaviour.
+    emitToWorker('endTransaction', { connectionId, commit: withCommit });
+    return { ok: true };
+  }
 
   const timeout = setTimeout(() => {
-    closed = true;
-    emitToWorker('endTransaction', { connectionId, commit: false });
-  }, 30000);
+    if (finalized) return;
+    ac.abort();
+    // Best-effort rollback; errors here cannot be surfaced through the
+    // original MySQL.startTransaction return because the caller has
+    // already long since moved on or will throw via the signal gate.
+    finalize(false).then((res) => {
+      if (!res.ok) {
+        console.error(`${invokingResource} startTransaction timed out and rollback failed: ${res.error}`);
+      }
+    });
+  }, START_TRANSACTION_TIMEOUT_MS);
 
   try {
     const queryFn = async (sql: string, values: CFXParameters) => {
-      if (closed) throw new Error('Transaction has timed out after 30 seconds.');
+      if (signal.aborted)
+        throw new Error('Transaction has timed out after 30 seconds.');
 
       const result = await sendToWorker<{ result: any } | { error: string }>('transactionQuery', {
         invokingResource,
@@ -521,6 +669,12 @@ MySQL.startTransaction = async (
         sql,
         values,
       });
+
+      // Second check: the timeout may have fired while sendToWorker was
+      // awaiting the worker. Surface as an abort so the caller knows the
+      // result was discarded.
+      if (signal.aborted)
+        throw new Error('Transaction has timed out after 30 seconds.');
 
       if ('error' in result) throw new Error(result.error);
       return result.result;
@@ -530,12 +684,39 @@ MySQL.startTransaction = async (
     commit = outcome !== false;
   } catch (err: any) {
     commit = false;
-    console.error(`${invokingResource} startTransaction failed: ${err.message}`);
-  } finally {
-    if (!closed) {
-      clearTimeout(timeout);
-      emitToWorker('endTransaction', { connectionId, commit });
+    // The timeout path has already handled its own rollback; only log
+    // if the caller threw for a different reason. In the propagate-
+    // errors flavour we still want the caller to see the error.
+    if (!signal.aborted) {
+      const message = err?.message ?? String(err);
+      console.error(`${invokingResource} startTransaction failed: ${message}`);
     }
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (signal.aborted) {
+    // Timeout handler already finalized the transaction. Return false to
+    // the caller so they know the transaction did not commit. This is
+    // NOT a propagate-errors opportunity — the caller's own await has
+    // resolved normally; throwing here would be a surprise.
+    return false;
+  }
+
+  const finalizeResult = await finalize(commit);
+  if (!finalizeResult.ok) {
+    if (mysql_start_transaction_propagate_errors) {
+      throw new Error(
+        `${invokingResource} startTransaction ${commit ? 'commit' : 'rollback'} failed: ${finalizeResult.error}`,
+      );
+    }
+    // Default path: we shouldn't reach here because finalize() only
+    // populates `ok: false` when the flag is set, but handle it
+    // defensively. Log and fall through to the normal return.
+    console.error(
+      `${invokingResource} startTransaction ${commit ? 'commit' : 'rollback'} failed: ${finalizeResult.error}`,
+    );
+    return false;
   }
 
   return commit;

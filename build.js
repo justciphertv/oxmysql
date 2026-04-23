@@ -1,8 +1,21 @@
 import { build } from 'esbuild';
+import { execSync } from 'child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'fs';
 
 const packageJson = JSON.parse(readFileSync('package.json', { encoding: 'utf8' }));
 const version = process.env.TGT_RELEASE_VERSION;
+
+// Build stamp — short git commit hash if available, otherwise 'dev'. Printed
+// in the server-startup banner so operators can confirm which build is
+// actually running on their FXServer (file caching, failed zip extraction,
+// and wrong-directory deployments all produce "fix didn't apply" symptoms
+// that this banner makes trivially diagnosable).
+let buildStamp;
+try {
+  buildStamp = execSync('git rev-parse --short HEAD', { encoding: 'utf8' }).trim();
+} catch {
+  buildStamp = 'dev';
+}
 
 if (version) {
   packageJson.version = version.replace('v', '');
@@ -18,9 +31,12 @@ writeFileSync(
   })
 );
 
-writeFileSync(
-  'fxmanifest.lua',
-  `fx_version 'cerulean'
+// Kept exactly as emitted pre-B2.3 — only the *order* of when this file
+// is written to disk changed. See the await block at the bottom of this
+// script: we only write fxmanifest.lua after esbuild has successfully
+// produced both bundles, so a failed build cannot leave a manifest on
+// disk that claims a newer version than the bundles actually represent.
+const fxmanifestContent = `fx_version 'cerulean'
 game 'common'
 use_experimental_fxv2_oal 'yes'
 lua54 'yes'
@@ -54,13 +70,20 @@ convar_category 'OxMySQL' {
 	'Configuration',
 	{
 		{ 'Connection string', 'mysql_connection_string', 'CV_STRING', 'mysql://user:password@localhost/database' },
-		{ 'Debug', 'mysql_debug', 'CV_BOOL', 'false' }
+		{ 'Debug', 'mysql_debug', 'CV_BOOL', 'false' },
+		{ 'Enable in-game UI', 'mysql_ui', 'CV_BOOL', 'false' },
+		{ 'Slow query warning (ms)', 'mysql_slow_query_warning', 'CV_INT', '200' },
+		{ 'Log buffer size', 'mysql_log_size', 'CV_INT', '100' },
+		{ 'Version check', 'mysql_versioncheck', 'CV_INT', '1' },
+		{ 'Transaction isolation level', 'mysql_transaction_isolation_level', 'CV_INT', '2' },
+		{ 'Logger service', 'mysql_logger_service', 'CV_STRING', '' }
 	}
 }
-`
-);
+`;
 
 mkdirSync('dist', { recursive: true });
+// dist/package.json must match the esbuild `format` below. If `format` ever
+// changes to 'esm', update this file or FXServer will fail to load the bundle.
 writeFileSync('dist/package.json', JSON.stringify({ type: 'commonjs' }, null, 2));
 
 const sharedConfig = {
@@ -72,16 +95,27 @@ const sharedConfig = {
   target: ['node22'],
   format: 'cjs',
   logLevel: 'info',
+  define: {
+    __BUILD_STAMP__: JSON.stringify(buildStamp),
+  },
 };
 
-build({
-  ...sharedConfig,
-  entryPoints: [`./src/fivem/index.ts`],
-  outfile: `dist/index.js`,
-});
+// Wait for both bundles to emit successfully before touching
+// fxmanifest.lua. Prior to B2.3 the manifest was written before esbuild
+// ran, so a failed build left a version-bumped manifest on disk paired
+// with stale bundles — operators then couldn't tell from the banner
+// whether the deployed resource matched the manifest version. Audit O5.
+await Promise.all([
+  build({
+    ...sharedConfig,
+    entryPoints: [`./src/fivem/index.ts`],
+    outfile: `dist/index.js`,
+  }),
+  build({
+    ...sharedConfig,
+    entryPoints: [`./src/worker/worker.ts`],
+    outfile: `dist/worker.js`,
+  }),
+]);
 
-build({
-  ...sharedConfig,
-  entryPoints: [`./src/worker/worker.ts`],
-  outfile: `dist/worker.js`,
-});
+writeFileSync('fxmanifest.lua', fxmanifestContent);

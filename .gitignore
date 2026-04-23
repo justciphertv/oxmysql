@@ -1,6 +1,10 @@
 .yarn.installed
 fxmanifest.lua
 
+# Vitest
+.vitest-cache
+html/
+
 # Logs
 logs
 *.log
