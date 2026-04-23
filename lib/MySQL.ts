@@ -63,6 +63,7 @@ const safeArgs = (query: Query | Transaction, params?: any, cb?: Function, trans
 
   if (transaction) {
     assert(typeof query === 'object', `First argument expected object, recieved ${typeof query}`);
+    assert(Array.isArray(query), `First argument expected array, received ${typeof query}`);
   } else {
     assert(typeof query === 'string', `First argument expected string, received ${typeof query}`);
   }
