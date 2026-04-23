@@ -1,4 +1,5 @@
 import { parentPort } from 'worker_threads';
+import * as perf from './perf';
 
 // These helpers are called from the worker's hot paths and must tolerate
 // the edge case where `parentPort` is null — that happens when the worker
@@ -35,5 +36,14 @@ export function callLogger(level: string, resource: string, message: string, met
 }
 
 export function sendResponse(id: number, data: any) {
+  // Instrumentation: isolate the cost of the `postMessage` call itself so
+  // Phase 3 channel analysis can distinguish structured-clone overhead
+  // from handler work. Zero-cost when OXMYSQL_PERF_TRACE is unset.
+  if (!perf.enabled()) {
+    parentPort?.postMessage({ action: 'response', id, data });
+    return;
+  }
+  const start = perf.now();
   parentPort?.postMessage({ action: 'response', id, data });
+  perf.mark('channel:worker.postResponse', start);
 }

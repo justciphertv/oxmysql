@@ -84,6 +84,80 @@ OXMYSQL_PERF_TRACE=1 bun run bench -- \
 
 The harness re-initialises the pool between `connectionLimit` values so you get a clean run per combination. Override `--concurrencies=...` and `--iterations=...` to focus on other shapes.
 
+## Parent↔worker channel overhead (Phase 3)
+
+The request lifecycle includes one additional cost that pool tuning cannot
+address: the latency of shipping a request from FiveM (parent thread) to
+the worker, and the response back. Measured with `bench/channel.ts` using
+a dedicated `noop` worker action that returns immediately with no DB work,
+so the parent-measured round-trip is **pure channel cost**.
+
+### Measured (noop action, OXMYSQL_PERF_TRACE=1)
+
+| concurrency | ops/s | parent.rtt avg | parent.post | worker.handler | worker.postResponse | one-way transit est. |
+|------------:|------:|---------------:|------------:|---------------:|--------------------:|---------------------:|
+| 16 | 45 484 |   342 µs |  4.0 µs |  7.8 µs |  4.0 µs | **≈ 163 µs** |
+| 32 | 45 642 |   692 µs |  3.0 µs |  8.5 µs |  4.1 µs | **≈ 338 µs** |
+
+The synchronous call costs (`parent.post`, `worker.postResponse`) are
+3–15 µs — structured clone of the envelope object is near-free. The
+remaining ~150–340 µs per crossing is **event-loop scheduling + cross-
+thread wake-up latency** inherent to `worker_threads`. It grows with
+concurrency because each queued response has to wait its turn in the
+receiving thread's task queue.
+
+### Channel cost vs. DB work
+
+For real workloads the channel is a small fraction of round-trip time:
+
+| scenario | conc | parent.rtt avg | worker handler | channel (RTT−handler) | channel % |
+|----------|-----:|---------------:|---------------:|----------------------:|----------:|
+| noop              | 16 |   342 µs |     8 µs |  **334 µs** | **98 %** |
+| query:SELECT-1    | 16 |  2 600 µs | 2 156 µs |    444 µs |   17 % |
+| query:SELECT-1    | 32 |  3 910 µs | 3 515 µs |    395 µs |   10 % |
+| query:indexed-pt  | 16 |  2 410 µs | 2 036 µs |    374 µs |   16 % |
+| query:indexed-pt  | 32 |  5 360 µs | 4 972 µs |    388 µs |    7 % |
+| tx:2x-insert      | 16 |  6 460 µs | 6 096 µs |    364 µs |    6 % |
+| tx:2x-insert      | 32 | 10 410 µs |10 126 µs |    284 µs |    3 % |
+
+Key takeaways:
+
+- Channel overhead is ~**300–400 µs per round-trip** across scenarios,
+  dominated by cross-thread scheduling — not by message size.
+- Any workload that actually touches the DB amortises the channel to
+  ≤ 17 % of RTT at `concurrency ≥ 16`, and ≤ 10 % at `concurrency = 32`.
+- The channel is **not the bottleneck** for any measured DB scenario.
+  Pool contention (Phase 2) and MariaDB server time dominate.
+
+### What would a channel optimization look like, and should we?
+
+Potential reductions that were considered and **not** pursued:
+
+- **Transferable buffers / shared memory.** Would reduce the ~4–15 µs
+  structured-clone cost. Negligible vs. the ~300 µs scheduling floor.
+- **Envelope field pruning.** Removing e.g. `action` in favour of a
+  numeric opcode saves bytes but not meaningful time — already small.
+- **Response batching.** The worker could coalesce multiple responses
+  into one `postMessage`. This would break the 1:1 request/response
+  contract, complicates cancellation, and the measured ceiling (~45 k
+  ops/s) is already well above any realistic FiveM workload.
+
+**None of these clear the ~300 µs wake-up floor**, so all are deferred.
+If future workloads demonstrate a strictly-serial hot path bottlenecked
+by channel RTT (unusual for FiveM), revisit with a targeted benchmark.
+
+### How to reproduce
+
+```bash
+bun run test:up
+OXMYSQL_PERF_TRACE=1 bun run bench:channel -- \
+  --concurrencies=16,32 --iterations=2000 --warmup=200
+```
+
+The bench spawns a real worker thread (not the in-process harness) and
+measures per-iteration parent→worker→parent wall time with sub-µs
+resolution.
+
 ## Phase 2 deferred items
 
 From the Phase 2 investigation (see Git history under `perf/transaction-under-load`):

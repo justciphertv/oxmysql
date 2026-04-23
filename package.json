@@ -27,7 +27,8 @@
     "test:watch": "vitest",
     "test:up": "docker compose -f tests/compose.yml up -d --wait",
     "test:down": "docker compose -f tests/compose.yml down -v",
-    "bench": "bun run bench/hotpath.ts"
+    "bench": "bun run bench/hotpath.ts",
+    "bench:channel": "bun run bench/channel.ts"
   },
   "dependencies": {
     "mariadb": "^3.5.2",

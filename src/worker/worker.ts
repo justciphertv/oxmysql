@@ -7,6 +7,7 @@ import { rawTransaction } from './database/rawTransaction';
 import { beginTransaction, runTransactionQuery, endTransaction } from './database/startTransaction';
 import { print, sendResponse, triggerFivemEvent } from './utils/events';
 import { sleep } from './utils/sleep';
+import * as perf from './utils/perf';
 import type { QueryType, TransactionQuery, CFXParameters } from '../types';
 
 // All worker-side dispatch errors are surfaced as:
@@ -24,6 +25,11 @@ export async function handleIncoming(message: {
   id?: number;
   data: any;
 }) {
+  // Phase 3 instrumentation: total worker-side handler span. Pairs with
+  // parent-measured round-trip (in the bench harness) so channel
+  // transit cost can be isolated from handler work. Zero-cost when
+  // OXMYSQL_PERF_TRACE is not '1'.
+  const handlerStart = perf.enabled() ? perf.now() : 0n;
   const { action, id, data } = message ?? ({} as { action: string; id?: number; data: any });
 
   try {
@@ -42,6 +48,8 @@ export async function handleIncoming(message: {
         /* same guard as above */
       }
     }
+  } finally {
+    if (perf.enabled()) perf.mark('channel:worker.handler', handlerStart);
   }
 }
 
@@ -222,6 +230,33 @@ async function dispatch(action: string, id: number | undefined, data: any) {
       // (id set) when the mysql_start_transaction_propagate_errors
       // convar is enabled. Respond only if the parent is listening.
       if (id !== undefined) sendResponse(id, result);
+      break;
+    }
+
+    // Bench/diagnostic helpers. Safe to leave always-on because they are
+    // not part of the public FiveM export surface and only produce
+    // meaningful data when OXMYSQL_PERF_TRACE=1. `noop` lets the channel
+    // bench measure pure round-trip cost without any DB work.
+    case 'noop': {
+      if (id !== undefined) sendResponse(id, { result: true });
+      break;
+    }
+
+    case 'perfSnapshot': {
+      if (id !== undefined) {
+        const snap = perf.snapshot();
+        const out: Record<string, { count: number; sumNs: string; maxNs: string }> = {};
+        for (const [k, v] of snap) {
+          out[k] = { count: v.count, sumNs: v.sumNs.toString(), maxNs: v.maxNs.toString() };
+        }
+        sendResponse(id, { result: out });
+      }
+      break;
+    }
+
+    case 'perfReset': {
+      perf.reset();
+      if (id !== undefined) sendResponse(id, { result: true });
       break;
     }
 
