@@ -393,7 +393,11 @@ onNet(
     search: string;
     sortBy?: { id: 'query' | 'executionTime'; desc: boolean }[];
   }) => {
-    if (typeof data.resource !== 'string' || !IsPlayerAceAllowed(source as unknown as string, 'command.mysql')) return;
+    // `source` inside a net-event handler is the CFX-provided numeric
+    // player-src. IsPlayerAceAllowed's type declaration expects a string,
+    // so coerce via String() instead of a double-cast. FXServer accepts
+    // either shape at runtime; this is just a typed-bridge cleanup.
+    if (typeof data.resource !== 'string' || !IsPlayerAceAllowed(String(source), 'command.mysql')) return;
 
     // Guard before the filter: a missing resource + non-empty search
     // previously threw TypeError on `undefined.filter(...)`. Short-
