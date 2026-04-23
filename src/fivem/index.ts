@@ -70,8 +70,41 @@ if (loggerService) {
 }
 
 const logger: (data: { level: string; resource: string; message: string; metadata?: any }) => void =
-  (loggerService && new Function(LoadResourceFile(loggerResource || resourceName, `${loggerService}.js`))()) ||
-  (() => {});
+  (() => {
+    if (!loggerService) return () => {};
+
+    try {
+      const loggerScript = LoadResourceFile(loggerResource || resourceName, `${loggerService}.js`);
+      if (!loggerScript) {
+        console.warn(
+          `^3[oxmysql] logger service "${loggerService}" could not be loaded; continuing without custom logger.^0`,
+        );
+        return () => {};
+      }
+
+      const loaded = new Function(loggerScript)();
+      if (typeof loaded !== 'function') {
+        console.warn(
+          `^3[oxmysql] logger service "${loggerService}" did not export a function; continuing without custom logger.^0`,
+        );
+        return () => {};
+      }
+
+      return loaded as (data: {
+        level: string;
+        resource: string;
+        message: string;
+        metadata?: any;
+      }) => void;
+    } catch (err) {
+      console.warn(
+        `^3[oxmysql] failed to initialize logger service "${loggerService}": ${
+          err instanceof Error ? err.message : String(err)
+        }. Continuing without custom logger.^0`,
+      );
+      return () => {};
+    }
+  })();
 
 // ─── Worker message handler ───────────────────────────────────────────────────
 
