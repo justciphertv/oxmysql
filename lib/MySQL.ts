@@ -24,7 +24,7 @@ interface Row {
 }
 
 interface OxMySQL {
-  store: (query: string) => void;
+  store: (query: string) => number;
   ready: (callback: () => void) => void;
   query: <T = Result | null>(query: Query, params?: Params | Callback<T>, cb?: Callback<T>) => Promise<T>;
   single: <T = Row | null>(
